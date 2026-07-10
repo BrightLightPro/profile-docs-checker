@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "doc-table-checker"
+version = "1.0.0"
+description = "Validate fixed-template PDF document identification tables against an Excel master list."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "PyMuPDF>=1.23",
+  "openpyxl>=3.1",
+]
+authors = [{ name = "Othman Thieyabat" }]
+
+[project.scripts]
+doc-table-checker = "doc_table_checker.cli:main"
+doc-table-checker-gui = "doc_table_checker.gui:main"
+
+[tool.setuptools.packages.find]
+include = ["doc_table_checker*"]

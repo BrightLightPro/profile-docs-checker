@@ -1,0 +1,2 @@
+PyMuPDF>=1.23
+openpyxl>=3.1
