@@ -10,11 +10,13 @@ from datetime import datetime, date
 from pathlib import Path
 import re
 import unicodedata
+import json
 import contextlib
 import io
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import fitz  # PyMuPDF
+from docx import Document
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 from openpyxl.utils import get_column_letter
@@ -169,6 +171,59 @@ class ValidationResult:
     candidate_rows: List[Tuple[int, float]] = field(default_factory=list)
 
 
+@dataclass
+class WordMapping:
+    table_index_zero_based: int
+    header_row_zero_based: int
+    data_start_row_zero_based: int
+    columns_by_index_zero_based: Dict[str, int]
+
+
+@dataclass
+class WordRecord:
+    word_file_name: str
+    word_row_number: int  # 1-based Word table row number for human review.
+    values_raw: Dict[str, str]
+    values_norm: Dict[str, str]
+
+
+@dataclass
+class WordFieldComparison:
+    word_file_name: str
+    word_row_number: int
+    field: str
+    word_raw: str
+    word_norm: str
+    excel_raw: str
+    excel_norm: str
+    result: str
+    excel_row: Optional[int] = None
+
+
+@dataclass
+class WordValidationResult:
+    record: WordRecord
+    status: str
+    confidence: float = 0.0
+    matched_excel_row: Optional[int] = None
+    issues: List[str] = field(default_factory=list)
+    comparisons: List[WordFieldComparison] = field(default_factory=list)
+    candidate_rows: List[Tuple[int, float]] = field(default_factory=list)
+
+
+WORD_STATUS_ORDER = {
+    "WORD_OK": 1,
+    "WORD_OK_WITH_NORMALIZATION": 2,
+    "WORD_MISMATCH": 3,
+    "WORD_LIKELY_WRONG_DOK_ID": 4,
+    "WORD_DUPLICATE_DOK_ID_RESOLVED": 5,
+    "WORD_DUPLICATE_DOK_ID_AMBIGUOUS": 6,
+    "WORD_DOK_ID_NOT_FOUND": 7,
+    "WORD_NO_RELIABLE_MATCH": 8,
+    "WORD_EXTRACTION_ERROR": 9,
+}
+
+
 def clean_text(value: object) -> str:
     """Return a stable one-line string without changing semantic content too much."""
     if value is None:
@@ -275,14 +330,18 @@ def normalize_month_year(value: object, allow_two_digit_year: bool = True) -> st
 
 
 def normalize_expected_ausgabe(user_value: str) -> str:
-    """Strict expected input: MM.YYYY or M.YYYY, normalized to YYYY-MM."""
+    """Expected input: month + year, normalized to YYYY-MM.
+
+    Preferred user format is MM.YYYY, but MM-YYYY, MM/YYYY and MM YYYY
+    are accepted to avoid unnecessary input failures.
+    """
     raw = clean_text(user_value)
-    m = re.fullmatch(r"(\d{1,2})\.(\d{4})", raw)
+    m = re.fullmatch(r"(\d{1,2})[.\-/\s](\d{4})", raw)
     if not m:
-        raise ValueError("Expected Ausgabe must be entered as MM.YYYY, for example 07.2026")
+        raise ValueError("Expected Ausgabe must be entered as month and year, for example 07.2026, 07-2026 or 07/2026")
     normalized = _normalize_month_number(int(m.group(1)), int(m.group(2)))
     if not normalized:
-        raise ValueError("Expected Ausgabe has an invalid month or year. Use MM.YYYY, for example 07.2026")
+        raise ValueError("Expected Ausgabe has an invalid month or year. Use for example 07.2026")
     return normalized
 
 
@@ -740,6 +799,354 @@ def list_pdf_files(pdf_folder: Path | str) -> List[Path]:
     return sorted([p for p in folder.iterdir() if p.is_file() and p.suffix.casefold() == ".pdf"])
 
 
+
+
+# ---------------------------------------------------------------------------
+# Word (.docx) table inspection and Word-vs-Excel comparison
+# ---------------------------------------------------------------------------
+
+WORD_COMPARISON_FIELDS = ["sprache", "dokumentnummer", "dok_id", "freigabe", "artikelnummer", "revision", "version"]
+
+
+def _word_cell_to_text(cell) -> str:
+    return clean_text(cell.text)
+
+
+def _field_header_variants() -> Dict[str, str]:
+    variants = {normalize_header(header): field for field, header in EXCEL_FIELD_TO_HEADER.items()}
+    variants.update({
+        normalize_header("Sprache"): "sprache",
+        normalize_header("Language"): "sprache",
+        normalize_header("Langue"): "sprache",
+        normalize_header("Idioma"): "sprache",
+        normalize_header("Dok Nr"): "dokumentnummer",
+        normalize_header("Dok.-Nr."): "dokumentnummer",
+        normalize_header("Dokumentnummer"): "dokumentnummer",
+        normalize_header("Dokument-Nr."): "dokumentnummer",
+        normalize_header("Document No."): "dokumentnummer",
+        normalize_header("Doc No."): "dokumentnummer",
+        normalize_header("DOK-ID"): "dok_id",
+        normalize_header("Dok-ID"): "dok_id",
+        normalize_header("DOK ID"): "dok_id",
+        normalize_header("Doc ID"): "dok_id",
+        normalize_header("Freigabe-/Änd.-Nr."): "freigabe",
+        normalize_header("Freigabe-/ Änd.-Nr."): "freigabe",
+        normalize_header("Freigabe / Änd. Nr."): "freigabe",
+        normalize_header("Release/Change No."): "freigabe",
+        normalize_header("Artikel Nr."): "artikelnummer",
+        normalize_header("Artikel-Nr."): "artikelnummer",
+        normalize_header("Artikelnummer"): "artikelnummer",
+        normalize_header("Article No."): "artikelnummer",
+        normalize_header("Part No."): "artikelnummer",
+        normalize_header("Revision"): "revision",
+        normalize_header("Rev."): "revision",
+        normalize_header("Rev"): "revision",
+        normalize_header("Version"): "version",
+        normalize_header("Vers."): "version",
+        normalize_header("Vers"): "version",
+    })
+    return variants
+
+
+def _detect_columns_from_header(headers: Sequence[str]) -> Dict[str, int]:
+    variants = _field_header_variants()
+    found: Dict[str, int] = {}
+    for idx, header in enumerate(headers):
+        key = normalize_header(header)
+        if key in variants and variants[key] not in found:
+            found[variants[key]] = idx
+    return found
+
+
+def inspect_word_tables(docx_path: Path | str, include_samples: bool = False, sample_rows: int = 5) -> Dict[str, Any]:
+    """Return a privacy-conscious structural description of tables in a DOCX.
+
+    By default, data samples are redacted. Headers are included because they are
+    needed to build the mapping. Use include_samples=True only locally if actual
+    sample row values are useful.
+    """
+    docx_path = Path(docx_path)
+    if not docx_path.exists():
+        raise FileNotFoundError(f"Word file not found: {docx_path}")
+    doc = Document(docx_path)
+    result: Dict[str, Any] = {"file_name": docx_path.name, "tables": []}
+    for table_index, table in enumerate(doc.tables):
+        rows: List[List[str]] = []
+        max_cols = 0
+        for row in table.rows:
+            cells = [_word_cell_to_text(cell) for cell in row.cells]
+            max_cols = max(max_cols, len(cells))
+            rows.append(cells)
+
+        best_header_row = 0 if rows else None
+        best_count = -1
+        best_columns: Dict[str, int] = {}
+        for i, cells in enumerate(rows[: min(len(rows), 15)]):
+            cols = _detect_columns_from_header(cells)
+            if len(cols) > best_count:
+                best_count = len(cols)
+                best_header_row = i
+                best_columns = cols
+
+        sample_payload = []
+        if rows and best_header_row is not None:
+            start = best_header_row + 1
+            for r in rows[start : start + sample_rows]:
+                if include_samples:
+                    sample_payload.append(r)
+                else:
+                    sample_payload.append(["<non-empty>" if clean_text(c) else "" for c in r])
+
+        result["tables"].append({
+            "table_index_zero_based": table_index,
+            "row_count": len(rows),
+            "column_count": max_cols,
+            "likely_header_row_zero_based": best_header_row,
+            "headers": rows[best_header_row] if rows and best_header_row is not None else [],
+            "detected_columns_by_index_zero_based": best_columns,
+            "suggested_mapping": {
+                "table_index_zero_based": table_index,
+                "header_row_zero_based": best_header_row if best_header_row is not None else 0,
+                "data_start_row_zero_based": (best_header_row + 1) if best_header_row is not None else 1,
+                "columns_by_index_zero_based": {field: best_columns.get(field) for field in WORD_COMPARISON_FIELDS},
+            },
+            "sample_rows": sample_payload,
+        })
+    return result
+
+
+def write_word_inspection_files(
+    docx_path: Path | str,
+    structure_out: Path | str = "word_table_structure.json",
+    mapping_out: Path | str = "word_mapping_template.json",
+    include_samples: bool = False,
+) -> Tuple[Path, Path]:
+    structure = inspect_word_tables(docx_path, include_samples=include_samples)
+    structure_out = Path(structure_out)
+    mapping_out = Path(mapping_out)
+    structure_out.parent.mkdir(parents=True, exist_ok=True)
+    mapping_out.parent.mkdir(parents=True, exist_ok=True)
+    structure_out.write_text(json.dumps(structure, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    # Choose the table with the most detected useful columns as the first mapping template.
+    tables = structure.get("tables", [])
+    if tables:
+        chosen = max(tables, key=lambda t: len([v for v in t.get("suggested_mapping", {}).get("columns_by_index_zero_based", {}).values() if v is not None]))
+        mapping = chosen.get("suggested_mapping", {})
+    else:
+        mapping = {
+            "table_index_zero_based": 0,
+            "header_row_zero_based": 0,
+            "data_start_row_zero_based": 1,
+            "columns_by_index_zero_based": {field: None for field in WORD_COMPARISON_FIELDS},
+        }
+    mapping["_instructions"] = (
+        "Edit columns_by_index_zero_based locally if needed. Indexes are zero-based: "
+        "the first Word table column is 0, the second is 1, etc. Leave a field as null to ignore it."
+    )
+    mapping_out.write_text(json.dumps(mapping, ensure_ascii=False, indent=2), encoding="utf-8")
+    return structure_out, mapping_out
+
+
+def load_word_mapping(mapping_path: Path | str) -> WordMapping:
+    mapping_path = Path(mapping_path)
+    if not mapping_path.exists():
+        raise FileNotFoundError(f"Word mapping JSON not found: {mapping_path}")
+    data = json.loads(mapping_path.read_text(encoding="utf-8"))
+
+    def _get_int(*names: str, default: Optional[int] = None) -> int:
+        for name in names:
+            if name in data and data[name] is not None:
+                return int(data[name])
+        if default is not None:
+            return default
+        raise ValueError(f"Missing required mapping value: one of {', '.join(names)}")
+
+    table_idx = _get_int("table_index_zero_based", "table_index", default=0)
+    header_row = _get_int("header_row_zero_based", "header_row", default=0)
+    data_start = _get_int("data_start_row_zero_based", "data_start_row", default=header_row + 1)
+    cols = data.get("columns_by_index_zero_based") or data.get("columns_by_index") or {}
+    clean_cols: Dict[str, int] = {}
+    for field_name, idx in cols.items():
+        if field_name not in WORD_COMPARISON_FIELDS:
+            continue
+        if idx is None or str(idx).strip() == "":
+            continue
+        clean_cols[field_name] = int(idx)
+    if not clean_cols:
+        raise ValueError("Word mapping does not contain any usable columns. Edit columns_by_index_zero_based in the mapping JSON.")
+    if "dok_id" not in clean_cols and not any(f in clean_cols for f in ("dokumentnummer", "artikelnummer")):
+        raise ValueError("Word mapping should include DOK-ID, Dok.-Nr. or Artikel-Nr. so rows can be matched to Excel.")
+    return WordMapping(
+        table_index_zero_based=table_idx,
+        header_row_zero_based=header_row,
+        data_start_row_zero_based=data_start,
+        columns_by_index_zero_based=clean_cols,
+    )
+
+
+def extract_word_records(docx_path: Path | str, mapping: WordMapping) -> List[WordRecord]:
+    docx_path = Path(docx_path)
+    if not docx_path.exists():
+        raise FileNotFoundError(f"Word file not found: {docx_path}")
+    doc = Document(docx_path)
+    if mapping.table_index_zero_based < 0 or mapping.table_index_zero_based >= len(doc.tables):
+        raise ValueError(f"Word table index {mapping.table_index_zero_based} invalid. The document has {len(doc.tables)} table(s).")
+    table = doc.tables[mapping.table_index_zero_based]
+    records: List[WordRecord] = []
+    for row_idx in range(mapping.data_start_row_zero_based, len(table.rows)):
+        row = table.rows[row_idx]
+        cells = row.cells
+        raw: Dict[str, str] = {}
+        norm: Dict[str, str] = {}
+        for field_name, col_idx in mapping.columns_by_index_zero_based.items():
+            value = _word_cell_to_text(cells[col_idx]) if 0 <= col_idx < len(cells) else ""
+            raw[field_name] = value
+            norm[field_name] = normalize_field(field_name, value)
+        if any(raw.values()):
+            records.append(WordRecord(
+                word_file_name=docx_path.name,
+                word_row_number=row_idx + 1,
+                values_raw=raw,
+                values_norm=norm,
+            ))
+    return records
+
+
+def _score_word_candidate(word_record: WordRecord, record: ExcelRecord) -> float:
+    earned = 0
+    possible = 0
+    for field_name, weight in MATCH_WEIGHTS.items():
+        if field_name not in word_record.values_norm:
+            continue
+        word_norm = word_record.values_norm.get(field_name, "")
+        xl_norm = record.values_norm.get(field_name, "")
+        if not word_norm or not xl_norm:
+            continue
+        possible += weight
+        if word_norm == xl_norm:
+            earned += weight
+    if possible == 0:
+        return 0.0
+    return round(100.0 * earned / possible, 1)
+
+
+def _word_candidate_list(word_record: WordRecord, records: Sequence[ExcelRecord]) -> List[Tuple[ExcelRecord, float]]:
+    scored = [(rec, _score_word_candidate(word_record, rec)) for rec in records]
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return scored
+
+
+def compare_word_value(field_name: str, word_raw: str, excel_raw: str, word_file_name: str, word_row_number: int, excel_row: Optional[int]) -> WordFieldComparison:
+    word_norm = normalize_field(field_name, word_raw)
+    excel_norm = normalize_field(field_name, excel_raw)
+    if not word_raw and not excel_raw:
+        res = "BOTH_EMPTY"
+    elif not word_raw:
+        res = "WORD_MISSING"
+    elif not excel_raw:
+        res = "EXCEL_MISSING"
+    elif word_norm == excel_norm and clean_text(word_raw) == clean_text(excel_raw):
+        res = "OK"
+    elif word_norm == excel_norm:
+        res = "OK_NORMALIZED"
+    else:
+        res = "MISMATCH"
+    return WordFieldComparison(
+        word_file_name=word_file_name,
+        word_row_number=word_row_number,
+        field=PDF_FIELD_DISPLAY[field_name],
+        word_raw=clean_text(word_raw),
+        word_norm=word_norm,
+        excel_raw=clean_text(excel_raw),
+        excel_norm=excel_norm,
+        result=res,
+        excel_row=excel_row,
+    )
+
+
+def validate_one_word_record(
+    word_record: WordRecord,
+    records: Sequence[ExcelRecord],
+    dok_id_index: Dict[str, List[ExcelRecord]],
+) -> WordValidationResult:
+    result = WordValidationResult(record=word_record, status="WORD_NO_RELIABLE_MATCH")
+    word_dok = word_record.values_norm.get("dok_id", "")
+    matched_record: Optional[ExcelRecord] = None
+    if word_dok and word_dok in dok_id_index:
+        rows = dok_id_index[word_dok]
+        if len(rows) == 1:
+            matched_record = rows[0]
+            result.confidence = 100.0
+        else:
+            scored = _word_candidate_list(word_record, rows)
+            result.candidate_rows = [(rec.row_number, score) for rec, score in scored[:10]]
+            if _best_candidate_is_clear(scored, threshold=70.0, margin=10.0):
+                matched_record = scored[0][0]
+                result.confidence = scored[0][1]
+                result.status = "WORD_DUPLICATE_DOK_ID_RESOLVED"
+                result.issues.append(f"DOK-ID appears {len(rows)} times in Excel; best duplicate row selected.")
+            else:
+                result.status = "WORD_DUPLICATE_DOK_ID_AMBIGUOUS"
+                result.confidence = scored[0][1] if scored else 0.0
+                result.issues.append(f"DOK-ID appears {len(rows)} times in Excel and no unique best row was found.")
+                return result
+    else:
+        scored = _word_candidate_list(word_record, records)
+        result.candidate_rows = [(rec.row_number, score) for rec, score in scored[:10]]
+        if _best_candidate_is_clear(scored, threshold=70.0, margin=15.0):
+            matched_record = scored[0][0]
+            result.confidence = scored[0][1]
+            result.status = "WORD_LIKELY_WRONG_DOK_ID"
+            result.issues.append("DOK-ID from Word is empty or not present in Excel, but another row strongly matches other fields.")
+        else:
+            result.confidence = scored[0][1] if scored else 0.0
+            result.status = "WORD_DOK_ID_NOT_FOUND" if word_dok else "WORD_NO_RELIABLE_MATCH"
+            result.issues.append("Word row could not be reliably matched to Excel.")
+            return result
+
+    result.matched_excel_row = matched_record.row_number if matched_record else None
+    comps: List[WordFieldComparison] = []
+    if matched_record:
+        for field_name in WORD_COMPARISON_FIELDS:
+            if field_name not in word_record.values_raw:
+                continue
+            comps.append(compare_word_value(
+                field_name,
+                word_record.values_raw.get(field_name, ""),
+                matched_record.values_raw.get(field_name, ""),
+                word_file_name=word_record.word_file_name,
+                word_row_number=word_record.word_row_number,
+                excel_row=matched_record.row_number,
+            ))
+    result.comparisons = comps
+    bad = [c for c in comps if c.result not in {"OK", "OK_NORMALIZED", "BOTH_EMPTY"}]
+    normalized_only = any(c.result == "OK_NORMALIZED" for c in comps)
+
+    if result.status in {"WORD_DUPLICATE_DOK_ID_RESOLVED", "WORD_LIKELY_WRONG_DOK_ID"}:
+        if bad:
+            result.issues.append("Matched row still has mismatching fields: " + ", ".join(c.field for c in bad))
+        return result
+
+    if bad:
+        result.status = "WORD_MISMATCH"
+        result.issues.append("Mismatching Word/Excel fields: " + ", ".join(c.field for c in bad))
+    elif normalized_only:
+        result.status = "WORD_OK_WITH_NORMALIZATION"
+        result.issues.append("All Word/Excel checks passed after normalization.")
+    else:
+        result.status = "WORD_OK"
+    return result
+
+
+def validate_word_records(
+    word_records: Sequence[WordRecord],
+    records: Sequence[ExcelRecord],
+    dok_id_index: Dict[str, List[ExcelRecord]],
+) -> List[WordValidationResult]:
+    return [validate_one_word_record(rec, records, dok_id_index) for rec in word_records]
+
+
 def run_validation(
     pdf_folder: Path | str,
     excel_path: Path | str,
@@ -749,16 +1156,24 @@ def run_validation(
     page_number: int = 2,
     table_index: Optional[int] = None,
     row_start: Optional[int] = None,
+    word_docx_path: Optional[Path | str] = None,
+    word_mapping_path: Optional[Path | str] = None,
     progress_callback=None,
 ) -> List[ValidationResult]:
     expected_norm = normalize_expected_ausgabe(expected_ausgabe)
+    if progress_callback:
+        progress_callback("Loading Excel...")
     records, actual_sheet, header_row, columns = load_excel_records(excel_path, sheet_name)
     if not records:
         raise ValueError("No data rows found in Excel after the required header row.")
+    if progress_callback:
+        progress_callback(f"Loaded {len(records)} Excel rows from sheet '{actual_sheet}' using header row {header_row}.")
     dok_idx = build_dok_id_index(records)
     pdfs = list_pdf_files(pdf_folder)
     if not pdfs:
         raise ValueError("No PDF files found in the selected folder.")
+    if progress_callback:
+        progress_callback(f"Found {len(pdfs)} PDF files.")
 
     results: List[ValidationResult] = []
     for i, pdf in enumerate(pdfs, start=1):
@@ -768,9 +1183,37 @@ def run_validation(
         res = validate_one_pdf(extracted, records, dok_idx, expected_ausgabe, expected_norm)
         results.append(res)
 
+    word_records: Optional[List[WordRecord]] = None
+    word_results: Optional[List[WordValidationResult]] = None
+    word_mapping: Optional[WordMapping] = None
+    if word_docx_path or word_mapping_path:
+        if not word_docx_path or not word_mapping_path:
+            raise ValueError("Both --word and --word-mapping are required when Word comparison is enabled.")
+        if progress_callback:
+            progress_callback("Loading Word table and mapping...")
+        word_mapping = load_word_mapping(word_mapping_path)
+        word_records = extract_word_records(word_docx_path, word_mapping)
+        if not word_records:
+            raise ValueError("No data rows found in the configured Word table/mapping.")
+        if progress_callback:
+            progress_callback(f"Loaded {len(word_records)} Word rows from '{Path(word_docx_path).name}'.")
+            progress_callback("Comparing Word rows with Excel...")
+        word_results = validate_word_records(word_records, records, dok_idx)
+
     if progress_callback:
         progress_callback("Writing report...")
-    write_report(results, records, output_path, expected_ausgabe, expected_norm, actual_sheet)
+    write_report(
+        results,
+        records,
+        output_path,
+        expected_ausgabe,
+        expected_norm,
+        actual_sheet,
+        word_results=word_results,
+        word_records=word_records,
+        word_mapping=word_mapping,
+        word_docx_path=word_docx_path,
+    )
     if progress_callback:
         progress_callback(f"Done. Report saved to: {output_path}")
     return results
@@ -836,6 +1279,10 @@ def write_report(
     expected_ausgabe: str,
     expected_ausgabe_norm: str,
     sheet_name: str,
+    word_results: Optional[Sequence[WordValidationResult]] = None,
+    word_records: Optional[Sequence[WordRecord]] = None,
+    word_mapping: Optional[WordMapping] = None,
+    word_docx_path: Optional[Path | str] = None,
 ):
     output_path = Path(output_path)
     wb = Workbook()
@@ -939,6 +1386,92 @@ def write_report(
                 rec.values_raw.get("sprache", ""),
             ])
 
+    if word_results is not None:
+        word_summary = wb.create_sheet("Word vs Excel Summary")
+        word_summary.append([
+            "Word file", "Word row", "Status", "Confidence", "Excel row", "Word DOK-ID",
+            "Word Dok.-Nr.", "Word Artikel-Nr.", "Issues"
+        ])
+        for res in sorted(word_results, key=lambda r: (WORD_STATUS_ORDER.get(r.status, 99), r.record.word_row_number)):
+            rec = res.record
+            word_summary.append([
+                rec.word_file_name,
+                rec.word_row_number,
+                res.status,
+                res.confidence,
+                res.matched_excel_row or "",
+                rec.values_raw.get("dok_id", ""),
+                rec.values_raw.get("dokumentnummer", ""),
+                rec.values_raw.get("artikelnummer", ""),
+                "; ".join(res.issues),
+            ])
+            word_summary.cell(word_summary.max_row, 3).fill = _status_fill(res.status.replace("WORD_", ""))
+
+        word_details = wb.create_sheet("Word vs Excel Details")
+        word_details.append([
+            "Word file", "Word row", "Status", "Excel row", "Field", "Word raw", "Word normalized",
+            "Excel raw", "Excel normalized", "Result"
+        ])
+        for res in word_results:
+            if not res.comparisons:
+                word_details.append([
+                    res.record.word_file_name, res.record.word_row_number, res.status, res.matched_excel_row or "",
+                    "Matching", "", "", "", "", "; ".join(res.issues)
+                ])
+                continue
+            for comp in res.comparisons:
+                word_details.append([
+                    comp.word_file_name,
+                    comp.word_row_number,
+                    res.status,
+                    comp.excel_row or "",
+                    comp.field,
+                    comp.word_raw,
+                    comp.word_norm,
+                    comp.excel_raw,
+                    comp.excel_norm,
+                    comp.result,
+                ])
+                if comp.result not in {"OK", "OK_NORMALIZED", "BOTH_EMPTY"}:
+                    word_details.cell(word_details.max_row, 10).fill = PatternFill("solid", fgColor="FFC7CE")
+                elif comp.result == "OK_NORMALIZED":
+                    word_details.cell(word_details.max_row, 10).fill = PatternFill("solid", fgColor="D9EAD3")
+
+        word_extracted = wb.create_sheet("Extracted Word values")
+        word_extracted.append(["Word file", "Word row", "Field", "Raw value", "Normalized value"])
+        for rec in word_records or []:
+            for field_name in WORD_COMPARISON_FIELDS:
+                if field_name in rec.values_raw:
+                    word_extracted.append([
+                        rec.word_file_name,
+                        rec.word_row_number,
+                        PDF_FIELD_DISPLAY[field_name],
+                        rec.values_raw.get(field_name, ""),
+                        rec.values_norm.get(field_name, ""),
+                    ])
+
+        word_candidates = wb.create_sheet("Word candidate rows")
+        word_candidates.append(["Word file", "Word row", "Status", "Candidate Excel row", "Candidate score"])
+        for res in word_results:
+            for row_num, score in res.candidate_rows[:10]:
+                word_candidates.append([res.record.word_file_name, res.record.word_row_number, res.status, row_num, score])
+
+        word_matched_rows = {res.matched_excel_row for res in word_results if res.matched_excel_row}
+        word_unmatched = wb.create_sheet("Excel rows not in Word")
+        word_unmatched.append(["Excel row", "DOK-ID", "Dok.-Nr.", "Artikel-Nr.", "Freigabe-/ Änd.-Nr.", "Rev.", "Vers.", "Sprache"])
+        for rec in excel_records:
+            if rec.row_number not in word_matched_rows:
+                word_unmatched.append([
+                    rec.row_number,
+                    rec.values_raw.get("dok_id", ""),
+                    rec.values_raw.get("dokumentnummer", ""),
+                    rec.values_raw.get("artikelnummer", ""),
+                    rec.values_raw.get("freigabe", ""),
+                    rec.values_raw.get("revision", ""),
+                    rec.values_raw.get("version", ""),
+                    rec.values_raw.get("sprache", ""),
+                ])
+
     meta = wb.create_sheet("Run info")
     meta.append(["Property", "Value"])
     meta.append(["Expected Ausgabe input", expected_ausgabe])
@@ -946,6 +1479,16 @@ def write_report(
     meta.append(["Excel sheet", sheet_name])
     meta.append(["PDF files processed", len(results)])
     meta.append(["Excel records loaded", len(excel_records)])
+    if word_results is not None:
+        meta.append(["Word comparison", "Enabled"])
+        meta.append(["Word file", Path(word_docx_path).name if word_docx_path else ""])
+        meta.append(["Word rows processed", len(word_results)])
+        if word_mapping:
+            meta.append(["Word table index zero-based", word_mapping.table_index_zero_based])
+            meta.append(["Word data start row zero-based", word_mapping.data_start_row_zero_based])
+            meta.append(["Word mapped columns zero-based", json.dumps(word_mapping.columns_by_index_zero_based, ensure_ascii=False)])
+    else:
+        meta.append(["Word comparison", "Disabled"])
 
     for sheet in wb.worksheets:
         _style_sheet(sheet)

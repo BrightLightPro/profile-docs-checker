@@ -1,0 +1,15 @@
+{
+  "table_index_zero_based": 0,
+  "header_row_zero_based": 0,
+  "data_start_row_zero_based": 1,
+  "columns_by_index_zero_based": {
+    "sprache": 0,
+    "dokumentnummer": 1,
+    "dok_id": 2,
+    "freigabe": 3,
+    "artikelnummer": 4,
+    "revision": 5,
+    "version": 6
+  },
+  "_instructions": "Edit columns_by_index_zero_based locally if needed. Indexes are zero-based: the first Word table column is 0, the second is 1, etc. Leave a field as null to ignore it."
+}

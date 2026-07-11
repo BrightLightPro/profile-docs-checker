@@ -1,0 +1,72 @@
+{
+  "file_name": "word_list.docx",
+  "tables": [
+    {
+      "table_index_zero_based": 0,
+      "row_count": 4,
+      "column_count": 7,
+      "likely_header_row_zero_based": 0,
+      "headers": [
+        "Sprache",
+        "Dok.-Nr.",
+        "DOK-ID",
+        "Freigabe-/ Änd.-Nr.",
+        "Artikel-Nr.",
+        "Rev.",
+        "Vers."
+      ],
+      "detected_columns_by_index_zero_based": {
+        "sprache": 0,
+        "dokumentnummer": 1,
+        "dok_id": 2,
+        "freigabe": 3,
+        "artikelnummer": 4,
+        "revision": 5,
+        "version": 6
+      },
+      "suggested_mapping": {
+        "table_index_zero_based": 0,
+        "header_row_zero_based": 0,
+        "data_start_row_zero_based": 1,
+        "columns_by_index_zero_based": {
+          "sprache": 0,
+          "dokumentnummer": 1,
+          "dok_id": 2,
+          "freigabe": 3,
+          "artikelnummer": 4,
+          "revision": 5,
+          "version": 6
+        }
+      },
+      "sample_rows": [
+        [
+          "<non-empty>",
+          "<non-empty>",
+          "<non-empty>",
+          "<non-empty>",
+          "<non-empty>",
+          "<non-empty>",
+          "<non-empty>"
+        ],
+        [
+          "<non-empty>",
+          "<non-empty>",
+          "<non-empty>",
+          "<non-empty>",
+          "<non-empty>",
+          "<non-empty>",
+          "<non-empty>"
+        ],
+        [
+          "<non-empty>",
+          "<non-empty>",
+          "<non-empty>",
+          "<non-empty>",
+          "<non-empty>",
+          "<non-empty>",
+          "<non-empty>"
+        ]
+      ]
+    }
+  ]
+}

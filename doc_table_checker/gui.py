@@ -13,14 +13,15 @@ from .core import (
     preview_extraction,
     run_validation,
     summarize_results,
+    write_word_inspection_files,
 )
 
 
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("PDF / Excel Document Table Checker")
-        self.geometry("980x700")
+        self.title("Profile Docs Checker")
+        self.geometry("1050x800")
         self.minsize(850, 600)
 
         self.pdf_folder_var = tk.StringVar()
@@ -31,6 +32,9 @@ class App(tk.Tk):
         self.page_var = tk.StringVar(value="2")
         self.table_index_var = tk.StringVar()
         self.row_start_var = tk.StringVar()
+        self.use_word_var = tk.BooleanVar(value=False)
+        self.word_file_var = tk.StringVar()
+        self.word_mapping_var = tk.StringVar()
 
         self._build_ui()
 
@@ -38,7 +42,7 @@ class App(tk.Tk):
         root = ttk.Frame(self, padding=12)
         root.pack(fill="both", expand=True)
 
-        title = ttk.Label(root, text="PDF / Excel Document Table Checker", font=("Segoe UI", 16, "bold"))
+        title = ttk.Label(root, text="Profile Docs Checker", font=("Segoe UI", 16, "bold"))
         title.pack(anchor="w", pady=(0, 10))
 
         form = ttk.Frame(root)
@@ -55,7 +59,7 @@ class App(tk.Tk):
 
         ttk.Label(form, text="Expected Ausgabe (MM.YYYY)").grid(row=3, column=0, sticky="w", padx=(0, 8), pady=4)
         ttk.Entry(form, textvariable=self.ausgabe_var).grid(row=3, column=1, sticky="ew", pady=4)
-        ttk.Label(form, text="Example: 07.2026").grid(row=3, column=2, sticky="w", padx=(8, 0), pady=4)
+        ttk.Label(form, text="Example: 07.2026 / 07-2026").grid(row=3, column=2, sticky="w", padx=(8, 0), pady=4)
 
         ttk.Label(form, text="PDF page number").grid(row=4, column=0, sticky="w", padx=(0, 8), pady=4)
         ttk.Entry(form, textvariable=self.page_var, width=12).grid(row=4, column=1, sticky="w", pady=4)
@@ -74,6 +78,15 @@ class App(tk.Tk):
 
         self._add_path_row(form, 5, "Output report", self.output_file_var, self.choose_output_file, save=True)
 
+        word = ttk.LabelFrame(root, text="Optional Word table comparison", padding=10)
+        word.pack(fill="x", pady=(8, 8))
+        word.columnconfigure(1, weight=1)
+        ttk.Checkbutton(word, text="Also compare Word table against Excel", variable=self.use_word_var).grid(row=0, column=0, columnspan=3, sticky="w", pady=4)
+        self._add_path_row(word, 1, "Word .docx file", self.word_file_var, self.choose_word_file)
+        self._add_path_row(word, 2, "Word mapping JSON", self.word_mapping_var, self.choose_word_mapping)
+        ttk.Button(word, text="Inspect Word file...", command=self.inspect_word_file).grid(row=3, column=2, sticky="ew", padx=(8, 0), pady=4)
+        ttk.Label(word, text="Run the inspector once, edit the mapping JSON if needed, then enable Word comparison.").grid(row=3, column=0, columnspan=2, sticky="w", pady=4)
+
         buttons = ttk.Frame(root)
         buttons.pack(fill="x", pady=(12, 8))
         ttk.Button(buttons, text="Preview extraction", command=self.preview).pack(side="left")
@@ -87,6 +100,7 @@ class App(tk.Tk):
         self.output.insert("end", "2. Select the Excel file and sheet.\n")
         self.output.insert("end", "3. Enter the global Ausgabe as MM.YYYY.\n")
         self.output.insert("end", "4. Click Preview extraction before running the full validation.\n")
+        self.output.insert("end", "5. Optional: use Inspect Word file to create a mapping JSON, then enable Word comparison.\n")
 
     def _add_path_row(self, parent, row, label, var, command, save=False):
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
@@ -105,6 +119,41 @@ class App(tk.Tk):
         if path:
             self.excel_file_var.set(path)
             self.load_sheets()
+
+    def choose_word_file(self):
+        path = filedialog.askopenfilename(title="Choose Word file", filetypes=[("Word files", "*.docx"), ("All files", "*.*")])
+        if path:
+            self.word_file_var.set(path)
+
+    def choose_word_mapping(self):
+        path = filedialog.askopenfilename(title="Choose Word mapping JSON", filetypes=[("JSON files", "*.json"), ("All files", "*.*")])
+        if path:
+            self.word_mapping_var.set(path)
+
+    def inspect_word_file(self):
+        word_file = self.word_file_var.get().strip()
+        if not word_file:
+            messagebox.showerror("Word file missing", "Please choose a Word .docx file first.")
+            return
+        base = Path(word_file).with_suffix("")
+        structure_default = str(base.parent / f"{base.name}_table_structure.json")
+        mapping_default = str(base.parent / f"{base.name}_mapping_template.json")
+        try:
+            structure_out, mapping_out = write_word_inspection_files(
+                word_file,
+                structure_out=structure_default,
+                mapping_out=mapping_default,
+                include_samples=False,
+            )
+            self.word_mapping_var.set(str(mapping_out))
+            self.log(f"Word structure saved: {structure_out}")
+            self.log(f"Word mapping template saved: {mapping_out}")
+            messagebox.showinfo(
+                "Word inspection complete",
+                "Created structure and mapping JSON files. Review/edit the mapping JSON if needed, then enable Word comparison."
+            )
+        except Exception as exc:
+            messagebox.showerror("Word inspection failed", str(exc))
 
     def choose_output_file(self):
         initial = self.output_file_var.get() or "validation_report.xlsx"
@@ -163,7 +212,14 @@ class App(tk.Tk):
             raise ValueError("PDF page number must be 1 or higher.")
         table_index = self.parse_int_or_none(self.table_index_var.get(), "Table number")
         row_start = self.parse_int_or_none(self.row_start_var.get(), "Row start")
-        return pdf_folder, excel, output, ausgabe, page, table_index, row_start
+        word_file = self.word_file_var.get().strip() if self.use_word_var.get() else None
+        word_mapping = self.word_mapping_var.get().strip() if self.use_word_var.get() else None
+        if self.use_word_var.get():
+            if not word_file:
+                raise ValueError("Word comparison is enabled, but no Word .docx file was selected.")
+            if not word_mapping:
+                raise ValueError("Word comparison is enabled, but no Word mapping JSON was selected.")
+        return pdf_folder, excel, output, ausgabe, page, table_index, row_start, word_file, word_mapping
 
     def log(self, text: str):
         self.output.insert("end", text + "\n")
@@ -213,7 +269,7 @@ class App(tk.Tk):
         thread = threading.Thread(target=self._run_thread, args=args, daemon=True)
         thread.start()
 
-    def _run_thread(self, pdf_folder, excel, output, ausgabe, page, table_index, row_start):
+    def _run_thread(self, pdf_folder, excel, output, ausgabe, page, table_index, row_start, word_file, word_mapping):
         try:
             def progress(msg: str):
                 self.after(0, lambda m=msg: self.log(m))
@@ -227,6 +283,8 @@ class App(tk.Tk):
                 page_number=page,
                 table_index=table_index,
                 row_start=row_start,
+                word_docx_path=word_file,
+                word_mapping_path=word_mapping,
                 progress_callback=progress,
             )
             counts = summarize_results(results)
@@ -235,7 +293,13 @@ class App(tk.Tk):
                 self.after(0, lambda s=status, c=count: self.log(f"  {s}: {c}"))
             self.after(0, lambda: messagebox.showinfo("Validation complete", f"Report saved to:\n{output}"))
         except Exception as exc:
-            self.after(0, lambda: messagebox.showerror("Validation failed", str(exc)))
+            # Capture exception text now. Python clears the exception variable after
+            # the except block, so a delayed Tkinter lambda must not reference `exc`
+            # directly; otherwise the GUI can appear to do nothing after
+            # "Starting validation...".
+            error_text = str(exc)
+            self.after(0, lambda e=error_text: self.log("ERROR: " + e))
+            self.after(0, lambda e=error_text: messagebox.showerror("Validation failed", e))
 
 
 def main():
