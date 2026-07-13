@@ -1,76 +1,52 @@
-# Test Results - Profile Docs Checker v1.1.0
+# Test results — Profile Docs Checker 1.2.0
 
-Tests were run with synthetic data only.
+Tested locally with generated, non-confidential files.
 
-## PDF/Excel synthetic test
+## PDF/Excel regression test
 
-Command:
+Passed:
 
-```bash
-cd /mnt/data/profile_docs_checker_v110
-python tests/test_synthetic.py
-```
-
-Result:
-
-```text
-Result counts: {'OK_WITH_NORMALIZATION': 1, 'AUSGABE_MISMATCH': 1, 'MISMATCH': 1, 'LIKELY_WRONG_DOK_ID': 1, 'DUPLICATE_DOK_ID_RESOLVED': 1}
-Synthetic test passed.
-Sample report: /mnt/data/profile_docs_checker_v110/test_output/validation_report.xlsx
-```
-
-Covered cases:
-
-- normal match with language/date/revision normalization
-- field mismatch
-- wrong/missing DOK-ID with fallback match
-- duplicated DOK-ID resolved by other fields
+- selectable PDF extraction from visible page 2
+- multilingual PDF labels ignored through row-position extraction
+- language normalization such as `de_DE` → `de`
+- Ausgabe forms `07.2026`, `07-2026`, `07/2026`, year-first, and month names
+- exact DOK-ID match
+- mismatching field report
+- likely wrong DOK-ID fallback
+- duplicate DOK-ID resolution
 - Ausgabe mismatch
+- Excel report generation
 
-## Ausgabe parser test
+## Existing custom Word-mapping regression test
 
-Inputs accepted and normalized to `2026-07`:
+Passed:
 
-```text
-07.2026
-07-2026
-07/2026
-7 2026
-```
+- Word inspector JSON generation
+- custom mapping loading
+- custom Word row extraction
+- DOK-ID-based matching and wrong-DOK-ID handling
+- Word report sheets
 
-## Word inspector and Word/Excel comparison test
+## Automatic change-notice Word-template test
 
-Synthetic Word document generated locally:
+A synthetic `.docx` reproducing the shared template structure was generated with:
 
-```text
-test_output/word_list.docx
-```
+- 13 logical columns
+- merged bilingual title and header cells
+- top-right Number
+- separate old/new drawing revision columns
+- `Dokument-Nr.`
+- `Rev neu/new` and `Vers neu/new` under the document group
 
-Inspector outputs:
+Passed:
 
-```text
-test_output/word_table_structure.json
-test_output/word_mapping_template.json
-```
+- automatic template recognition without JSON
+- correct detection of columns 0, 3, 7, and 8
+- correct exclusion of the drawing-only `Rev neu/new` column
+- top-right Number extraction
+- wrapped/merged Word-header handling
+- revision/version normalization
+- Word Number vs Excel Freigabe-/Änd.-Nr. mismatch reporting
+- `Word template info` report sheet
 
-Full validation with Word comparison generated:
-
-```text
-test_output/validation_report_with_word.xlsx
-```
-
-Report contains these Word-specific sheets:
-
-```text
-Word vs Excel Summary
-Word vs Excel Details
-Extracted Word values
-Word candidate rows
-Excel rows not in Word
-```
-
-Covered Word cases:
-
-- exact Word row match by DOK-ID
-- Word row with wrong DOK-ID resolved by fallback fields
-- Word comparison details written to report
+Generated sample report: `test_output/validation_report_auto_word.xlsx`.

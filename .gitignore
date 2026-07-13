@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+validation_report*.xlsx
+word_table_structure.json
+word_mapping_template.json

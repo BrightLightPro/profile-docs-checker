@@ -1,161 +1,115 @@
-# Profile Docs Checker
+# Profile Docs Checker 1.2.0
 
-A small Windows-friendly Python tool for validating fixed-template PDF document-identification tables against an Excel master list. Version 1.1.0 also optionally compares a document list table in a Word `.docx` file against the same Excel file.
+A Windows-friendly Python tool that validates fixed-template PDF document-identification tables against an Excel master list. It can also compare the standard bilingual Word **Freigabe-/Änderungsmitteilung / Engineering Change Notice** table with the same Excel list.
 
-## What it checks
+## PDF checks
 
-### PDF vs Excel
+For every PDF in the selected folder, the tool opens visible page `2`, extracts the fixed metadata table by position, and compares:
 
-For every PDF in a selected folder, the tool opens the configured page, default visible page `2`, extracts the fixed metadata table by row position, and compares these fields with Excel:
+- Sprache → Excel `Sprache`
+- Dokumentnummer → `Dok.-Nr.`
+- DOK-ID → `DOK-ID`
+- Freigabe-/Änd.-Nr. → `Freigabe-/ Änd.-Nr.`
+- Artikelnummer → `Artikel-Nr.`
+- Revision → `Rev.`
+- Version → `Vers.`
 
-- Sprache
-- Dokumentnummer / `Dok.-Nr.`
-- DOK-ID
-- Freigabe-/Änd.-Nr.
-- Artikelnummer / `Artikel-Nr.`
-- Revision / `Rev.`
-- Version / `Vers.`
+`Dokumentname` is ignored. The global Ausgabe input accepts `07.2026`, `07-2026`, `07/2026`, or `07 2026` and is compared with the Ausgabe in every PDF.
 
-`Dokumentname` is ignored.
+## Automatic Word-template check
 
-### Ausgabe check
+For the standard Word template shown as **Freigabe-/Änderungsmitteilung / Engineering Change Notice**, no mapping JSON is needed.
 
-The expected Ausgabe is entered once globally before the run. Preferred format is:
+The tool automatically recognizes the 13-column table and reads:
 
-```text
-07.2026
-```
+- top-right **Number** → Excel `Freigabe-/ Änd.-Nr.` for every listed row
+- `Artikel-Nr. / part no.` → Excel `Artikel-Nr.`
+- `Dokument-Nr. / document no.` → Excel `Dok.-Nr.`
+- `Rev neu/new` under `Zeichnung / Dokument / Stückliste` → Excel `Rev.`
+- `Vers neu/new` under the same group → Excel `Vers.`
 
-The tool also accepts:
+It deliberately ignores the drawing-only old/new revision columns, Format, old revision/version, sheets, disposal, approval relevance, and description.
 
-```text
-07-2026
-07/2026
-07 2026
-```
+Word rows are matched primarily by Dokument-Nr. Duplicate document numbers are resolved with Artikel-Nr., new revision, and new version. If Dokument-Nr. is wrong or absent, the tool tries a cautious fallback and flags the result.
 
-Internally all of these are normalized to `YYYY-MM`.
-
-### Language normalization
-
-The PDF language value can be like `de_DE` or `en_US`. Excel can contain just `de` or `en`. The tool compares only the language part, so `en_US` and `en_GB` both match Excel `en`.
-
-### Word vs Excel, optional
-
-If enabled, the tool reads a table in a Word `.docx` file using a local JSON mapping file, then compares the Word table rows against the Excel list using the same matching strategy:
-
-1. match by DOK-ID
-2. resolve duplicate DOK-ID by comparing the other fields
-3. fallback match if the DOK-ID is missing or wrong
-4. report ambiguous/unmatched rows for review
-
-The Word template does not need to be shared. Run the local inspector to create the mapping file.
-
-## Install
-
-From a local folder:
+## Install or update from GitHub
 
 ```powershell
-py -m pip install --upgrade --force-reinstall "C:\path\to\profile_docs_checker_v110"
+py -m pip install --upgrade --force-reinstall --no-cache-dir "git+https://github.com/brightlightpro/profile-docs-checker.git"
 ```
 
-From the ZIP:
+Check the installed version:
 
 ```powershell
-py -m pip install --upgrade --force-reinstall "C:\path\to\profile_docs_checker_tool_pip_v1_1_0.zip"
+py -c "import importlib.metadata as m; print(m.version('profile-docs-checker'))"
 ```
 
-From your GitHub repo after pushing the updated files:
-
-```powershell
-py -m pip install --upgrade --force-reinstall "git+https://github.com/brightlightpro/profile-docs-checker.git"
-```
+It should print `1.2.0`.
 
 ## Run the GUI
-
-Preferred new command:
 
 ```powershell
 profile-docs-checker-gui
 ```
 
-Backward-compatible old command:
+The old command remains available:
 
 ```powershell
 doc-table-checker-gui
 ```
 
-## Run from command line
+### Word workflow in the GUI
 
-PDF/Excel only:
+1. Tick **Also compare Word table against Excel**.
+2. Select the `.docx` change-notice file.
+3. Leave **Custom mapping JSON** blank for the standard template.
+4. Click **Preview Word extraction** and verify the detected columns and top-right Number.
+5. Run full validation.
+
+## Command-line examples
+
+PDF and Excel only:
 
 ```powershell
 profile-docs-checker --pdf-folder "C:\PDFs" --excel "C:\master.xlsx" --out "C:\report.xlsx" --ausgabe 07.2026
 ```
 
-PDF/Excel plus Word comparison:
+PDF, Excel, and the standard Word template:
 
 ```powershell
-profile-docs-checker --pdf-folder "C:\PDFs" --excel "C:\master.xlsx" --out "C:\report.xlsx" --ausgabe 07.2026 --word "C:\docs\list.docx" --word-mapping "C:\docs\word_mapping_template.json"
+profile-docs-checker --pdf-folder "C:\PDFs" --excel "C:\master.xlsx" --out "C:\report.xlsx" --ausgabe 07.2026 --word "C:\docs\change-notice.docx"
 ```
 
-## Inspect a Word file locally
-
-Run this once on the confidential Word file:
+For a different Word-table template, a custom mapping remains supported:
 
 ```powershell
-profile-docs-checker-inspect-word "C:\docs\list.docx" --structure-out "C:\docs\word_table_structure.json" --mapping-out "C:\docs\word_mapping_template.json"
+profile-docs-checker --pdf-folder "C:\PDFs" --excel "C:\master.xlsx" --out "C:\report.xlsx" --ausgabe 07.2026 --word "C:\docs\other-list.docx" --word-mapping "C:\docs\word_mapping.json"
 ```
 
-The structure JSON contains table/header information. By default, sample data cells are redacted.
+## Optional custom-table inspector
 
-The mapping JSON looks like this:
+The inspector is no longer required for the standard change-notice template. It remains available for other Word tables:
 
-```json
-{
-  "table_index_zero_based": 0,
-  "header_row_zero_based": 0,
-  "data_start_row_zero_based": 1,
-  "columns_by_index_zero_based": {
-    "sprache": 0,
-    "dokumentnummer": 1,
-    "dok_id": 2,
-    "freigabe": 3,
-    "artikelnummer": 4,
-    "revision": 5,
-    "version": 6
-  }
-}
+```powershell
+profile-docs-checker-inspect-word "C:\docs\other-list.docx" --structure-out "C:\docs\word_table_structure.json" --mapping-out "C:\docs\word_mapping_template.json"
 ```
-
-Column indexes are zero-based: first Word table column = `0`, second = `1`, etc. Leave a field as `null` to ignore it.
 
 ## Report sheets
 
-The generated Excel report includes the previous PDF sheets plus optional Word sheets:
+The report contains the PDF sheets plus these Word-specific sheets when Word checking is enabled:
 
-- `Summary`
-- `Detailed comparison`
-- `Extracted PDF values`
-- `Candidate rows`
-- `Excel rows not matched`
-- `Word vs Excel Summary` if Word comparison is enabled
-- `Word vs Excel Details` if Word comparison is enabled
-- `Extracted Word values` if Word comparison is enabled
-- `Word candidate rows` if Word comparison is enabled
-- `Excel rows not in Word` if Word comparison is enabled
-- `Run info`
+- `Word vs Excel Summary`
+- `Word vs Excel Details`
+- `Extracted Word values`
+- `Word template info`
+- `Word candidate rows`
+- `Excel rows not in Word`
 
-## Safe workflow
+The `Word template info` sheet records the recognized table, detected column indexes, the top-right Number, and extraction warnings.
 
-1. Copy the PDFs, Excel file, and Word file to a local disk.
-2. Make sure the output report is not open in Excel.
-3. Run the PDF extraction preview.
-4. For Word checking, run the Word inspector and review the mapping JSON.
-5. Run full validation.
+## Important notes
 
-## Notes
-
-- The Word feature supports `.docx`, not old `.doc` files.
+- Word input must be `.docx`, not legacy `.doc`.
+- Keep source files on a local disk while running.
+- Close the output report in Excel before overwriting it.
 - Do not upload real client PDFs, Excel files, or Word files to GitHub.
-- The tool is designed for selectable/text-based PDFs, not scans.

@@ -8,7 +8,7 @@ from doc_table_checker.core import write_word_inspection_files
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Inspect DOCX tables locally and create a structure JSON plus editable Word mapping template."
+        description="Inspect DOCX tables locally. The standard change-notice template is recognized automatically; the JSON mapping is for other Word templates."
     )
     parser.add_argument("docx", help="Word .docx file to inspect.")
     parser.add_argument("--structure-out", default="word_table_structure.json", help="Output JSON describing detected tables. Default: word_table_structure.json")
@@ -24,7 +24,7 @@ def main() -> int:
     )
     print(f"Saved Word structure: {structure_out}")
     print(f"Saved mapping template: {mapping_out}")
-    print("Edit the mapping JSON if needed, then pass it to validation with --word-mapping.")
+    print("For the standard Freigabe-/Änderungsmitteilung template, no mapping is required. Use the mapping only for another table template.")
     return 0
 
 

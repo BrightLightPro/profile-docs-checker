@@ -11,6 +11,7 @@ from .core import (
     PDF_FIELDS,
     PDF_FIELD_DISPLAY,
     preview_extraction,
+    preview_word_extraction,
     run_validation,
     summarize_results,
     write_word_inspection_files,
@@ -21,7 +22,7 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Profile Docs Checker")
-        self.geometry("1050x800")
+        self.geometry("1050x850")
         self.minsize(850, 600)
 
         self.pdf_folder_var = tk.StringVar()
@@ -83,13 +84,14 @@ class App(tk.Tk):
         word.columnconfigure(1, weight=1)
         ttk.Checkbutton(word, text="Also compare Word table against Excel", variable=self.use_word_var).grid(row=0, column=0, columnspan=3, sticky="w", pady=4)
         self._add_path_row(word, 1, "Word .docx file", self.word_file_var, self.choose_word_file)
-        self._add_path_row(word, 2, "Word mapping JSON", self.word_mapping_var, self.choose_word_mapping)
-        ttk.Button(word, text="Inspect Word file...", command=self.inspect_word_file).grid(row=3, column=2, sticky="ew", padx=(8, 0), pady=4)
-        ttk.Label(word, text="Run the inspector once, edit the mapping JSON if needed, then enable Word comparison.").grid(row=3, column=0, columnspan=2, sticky="w", pady=4)
+        self._add_path_row(word, 2, "Custom mapping JSON (optional)", self.word_mapping_var, self.choose_word_mapping)
+        ttk.Label(word, text="The Freigabe-/Änderungsmitteilung template is recognized automatically. Use a mapping only for a different Word template.").grid(row=3, column=0, columnspan=2, sticky="w", pady=4)
+        ttk.Button(word, text="Inspect custom table...", command=self.inspect_word_file).grid(row=3, column=2, sticky="ew", padx=(8, 0), pady=4)
 
         buttons = ttk.Frame(root)
         buttons.pack(fill="x", pady=(12, 8))
-        ttk.Button(buttons, text="Preview extraction", command=self.preview).pack(side="left")
+        ttk.Button(buttons, text="Preview PDF extraction", command=self.preview).pack(side="left")
+        ttk.Button(buttons, text="Preview Word extraction", command=self.preview_word).pack(side="left", padx=(8, 0))
         ttk.Button(buttons, text="Run full validation", command=self.run).pack(side="left", padx=(8, 0))
         ttk.Button(buttons, text="Quit", command=self.destroy).pack(side="right")
 
@@ -99,8 +101,8 @@ class App(tk.Tk):
         self.output.insert("end", "1. Select the PDF folder.\n")
         self.output.insert("end", "2. Select the Excel file and sheet.\n")
         self.output.insert("end", "3. Enter the global Ausgabe as MM.YYYY.\n")
-        self.output.insert("end", "4. Click Preview extraction before running the full validation.\n")
-        self.output.insert("end", "5. Optional: use Inspect Word file to create a mapping JSON, then enable Word comparison.\n")
+        self.output.insert("end", "4. Click Preview PDF extraction before running the full validation.\n")
+        self.output.insert("end", "5. Optional: choose the standard Word change-notice file; no mapping JSON is required.\n")
 
     def _add_path_row(self, parent, row, label, var, command, save=False):
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
@@ -145,12 +147,11 @@ class App(tk.Tk):
                 mapping_out=mapping_default,
                 include_samples=False,
             )
-            self.word_mapping_var.set(str(mapping_out))
             self.log(f"Word structure saved: {structure_out}")
             self.log(f"Word mapping template saved: {mapping_out}")
             messagebox.showinfo(
                 "Word inspection complete",
-                "Created structure and mapping JSON files. Review/edit the mapping JSON if needed, then enable Word comparison."
+                "Created structure and custom mapping JSON files. The mapping is only needed for a non-standard Word table."
             )
         except Exception as exc:
             messagebox.showerror("Word inspection failed", str(exc))
@@ -214,11 +215,8 @@ class App(tk.Tk):
         row_start = self.parse_int_or_none(self.row_start_var.get(), "Row start")
         word_file = self.word_file_var.get().strip() if self.use_word_var.get() else None
         word_mapping = self.word_mapping_var.get().strip() if self.use_word_var.get() else None
-        if self.use_word_var.get():
-            if not word_file:
-                raise ValueError("Word comparison is enabled, but no Word .docx file was selected.")
-            if not word_mapping:
-                raise ValueError("Word comparison is enabled, but no Word mapping JSON was selected.")
+        if self.use_word_var.get() and not word_file:
+            raise ValueError("Word comparison is enabled, but no Word .docx file was selected.")
         return pdf_folder, excel, output, ausgabe, page, table_index, row_start, word_file, word_mapping
 
     def log(self, text: str):
@@ -255,6 +253,31 @@ class App(tk.Tk):
                     self.log("  Warnings: " + "; ".join(item.warnings))
         except Exception as exc:
             messagebox.showerror("Preview failed", str(exc))
+
+    def preview_word(self):
+        try:
+            word_file = self.word_file_var.get().strip()
+            if not word_file:
+                raise ValueError("Please choose a Word .docx file first.")
+            mapping = self.word_mapping_var.get().strip() or None
+            records, info = preview_word_extraction(word_file, mapping_path=mapping, limit=10)
+            self.log("\nPreview Word extraction...")
+            self.log(f"Template: {info.template_type}")
+            self.log(f"Table index: {info.table_index_zero_based}; data starts at Word row {info.data_start_row_zero_based + 1}")
+            self.log(f"Columns: {info.columns_by_index_zero_based}")
+            self.log(f"Top-right Number: {info.change_number_raw!r}")
+            if info.warnings:
+                self.log("Warnings: " + "; ".join(info.warnings))
+            for rec in records:
+                self.log("-" * 70)
+                self.log(f"Word row {rec.word_row_number}")
+                for field in ("dokumentnummer", "artikelnummer", "revision", "version", "freigabe"):
+                    if field in rec.values_raw:
+                        self.log(f"  {PDF_FIELD_DISPLAY[field]:22} raw={rec.values_raw.get(field, '')!r}  norm={rec.values_norm.get(field, '')!r}")
+            if not records:
+                self.log("No data rows found.")
+        except Exception as exc:
+            messagebox.showerror("Word preview failed", str(exc))
 
     def run(self):
         try:
