@@ -13,26 +13,26 @@ from .core import run_validation, summarize_results
 
 
 class App(tk.Tk):
-    """Dark desktop interface for PDF/Excel/Word profile validation."""
+    """Light control-panel interface for PDF/Excel/Word profile validation."""
 
-    BG = "#0A0E11"
-    PANEL = "#11171B"
-    PANEL_ALT = "#151D22"
-    PANEL_HOVER = "#1A252B"
-    BORDER = "#27363D"
-    ACCENT = "#00C7D9"
-    ACCENT_DARK = "#087C87"
-    TEXT = "#EAF7F8"
-    MUTED = "#83969C"
-    WARNING = "#EAB84D"
-    ERROR = "#FF6470"
-    SUCCESS = "#5FD39A"
+    BG = "#EEF4F6"
+    PANEL = "#FFFFFF"
+    PANEL_ALT = "#E8F1F4"
+    PANEL_HOVER = "#DCECEF"
+    BORDER = "#BFD1D8"
+    ACCENT = "#00AFC3"
+    ACCENT_DARK = "#007A8A"
+    TEXT = "#20343C"
+    MUTED = "#667A83"
+    WARNING = "#AE7200"
+    ERROR = "#C94855"
+    SUCCESS = "#247F5C"
 
     def __init__(self):
         super().__init__()
         self.title("Profile Docs Checker")
-        self.geometry("1120x800")
-        self.minsize(1000, 700)
+        self.geometry("1180x760")
+        self.minsize(1040, 690)
         self.configure(bg=self.BG)
 
         self.pdf_folder_var = tk.StringVar()
@@ -46,9 +46,27 @@ class App(tk.Tk):
         self._configure_styles()
         self._build_ui()
         self._refresh_mode_status()
+        self.after_idle(self._maximize_or_fit)
 
         self.pdf_folder_var.trace_add("write", lambda *_: self._refresh_mode_status())
         self.word_file_var.trace_add("write", lambda *_: self._refresh_mode_status())
+
+    def _maximize_or_fit(self):
+        """Open large enough to show the complete interface without manual resizing."""
+        try:
+            if os.name == "nt":
+                self.state("zoomed")
+                return
+        except tk.TclError:
+            pass
+        self.update_idletasks()
+        screen_w = self.winfo_screenwidth()
+        screen_h = self.winfo_screenheight()
+        width = min(1240, max(1040, screen_w - 60))
+        height = min(820, max(690, screen_h - 90))
+        x = max(0, (screen_w - width) // 2)
+        y = max(0, (screen_h - height) // 2)
+        self.geometry(f"{width}x{height}+{x}+{y}")
 
     # ------------------------------------------------------------------ styling
     def _configure_styles(self):
@@ -88,7 +106,7 @@ class App(tk.Tk):
         style.configure(
             "Accent.TButton",
             background=self.ACCENT,
-            foreground="#001316",
+            foreground="#FFFFFF",
             bordercolor=self.ACCENT,
             lightcolor=self.ACCENT,
             darkcolor=self.ACCENT_DARK,
@@ -98,8 +116,8 @@ class App(tk.Tk):
         )
         style.map(
             "Accent.TButton",
-            background=[("disabled", self.BORDER), ("active", "#34D9E5")],
-            foreground=[("disabled", self.MUTED), ("active", "#001316")],
+            background=[("disabled", "#D7E3E7"), ("active", "#18C0D1")],
+            foreground=[("disabled", self.MUTED), ("active", "#FFFFFF")],
         )
         style.configure(
             "Ghost.TButton",
@@ -134,8 +152,8 @@ class App(tk.Tk):
         )
         style.configure(
             "Dark.TCombobox",
-            fieldbackground=self.PANEL_ALT,
-            background=self.PANEL_ALT,
+            fieldbackground="#F8FBFC",
+            background="#F8FBFC",
             foreground=self.TEXT,
             arrowcolor=self.ACCENT,
             bordercolor=self.BORDER,
@@ -145,9 +163,9 @@ class App(tk.Tk):
         )
         style.map(
             "Dark.TCombobox",
-            fieldbackground=[("readonly", self.PANEL_ALT)],
+            fieldbackground=[("readonly", "#F8FBFC")],
             foreground=[("readonly", self.TEXT)],
-            selectbackground=[("readonly", self.PANEL_ALT)],
+            selectbackground=[("readonly", "#F8FBFC")],
             selectforeground=[("readonly", self.TEXT)],
         )
         style.configure(
@@ -196,7 +214,7 @@ class App(tk.Tk):
             width - 38, 112,
             38, 112,
             0, 84,
-            fill=self.PANEL_ALT,
+            fill=self.PANEL,
             outline=self.BORDER,
         )
         canvas.create_line(42, 111, width - 42, 111, fill=self.ACCENT, width=2)
@@ -225,7 +243,7 @@ class App(tk.Tk):
         canvas.create_text(
             width - 45, 74,
             anchor="e",
-            text="v1.3.0",
+            text="v1.4.0",
             fill=self.ACCENT,
             font=("Consolas", 9),
         )
@@ -333,7 +351,7 @@ class App(tk.Tk):
         tk.Label(mode_strip, text="MODE", bg=self.PANEL_ALT, fg=self.ACCENT, font=("Consolas", 8, "bold")).pack(side="left", padx=(10, 8), pady=7)
         tk.Label(mode_strip, textvariable=self.mode_text_var, bg=self.PANEL_ALT, fg=self.TEXT, font=("Segoe UI", 8), wraplength=420, justify="left").pack(side="left", fill="x", expand=True, padx=(0, 10), pady=7)
 
-        text_frame = tk.Frame(parent, bg=self.BG, highlightthickness=1, highlightbackground=self.BORDER)
+        text_frame = tk.Frame(parent, bg="#F8FBFC", highlightthickness=1, highlightbackground=self.BORDER)
         text_frame.grid(row=3, column=0, sticky="nsew", padx=16, pady=(0, 16))
         text_frame.grid_rowconfigure(0, weight=1)
         text_frame.grid_columnconfigure(0, weight=1)
@@ -341,11 +359,11 @@ class App(tk.Tk):
         self.output = tk.Text(
             text_frame,
             wrap="word",
-            bg=self.BG,
-            fg="#BFD0D4",
+            bg="#F8FBFC",
+            fg="#334A53",
             insertbackground=self.ACCENT,
             selectbackground=self.ACCENT_DARK,
-            selectforeground=self.TEXT,
+            selectforeground="#FFFFFF",
             relief="flat",
             borderwidth=0,
             padx=12,
@@ -367,16 +385,16 @@ class App(tk.Tk):
         return tk.Entry(
             parent,
             textvariable=variable,
-            bg=self.PANEL_ALT,
+            bg="#F8FBFC",
             fg=self.TEXT,
             insertbackground=self.ACCENT,
             selectbackground=self.ACCENT_DARK,
-            selectforeground=self.TEXT,
+            selectforeground="#FFFFFF",
             relief="flat",
             highlightthickness=1,
             highlightbackground=self.BORDER,
             highlightcolor=self.ACCENT,
-            disabledbackground=self.PANEL_ALT,
+            disabledbackground="#EEF3F5",
             disabledforeground=self.MUTED,
             font=("Segoe UI", 9),
         )

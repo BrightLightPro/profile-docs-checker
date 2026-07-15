@@ -1,16 +1,20 @@
-# Profile Docs Checker 1.3.0
+# Profile Docs Checker 1.4.0
 
 Profile Docs Checker validates document metadata across a fixed Excel master list, selectable PDFs, and the standard bilingual Word **Freigabe-/Änderungsmitteilung / Engineering Change Notice** template.
 
-## What version 1.3 adds
+## What version 1.4 changes
 
-- Reads the true page count from every PDF.
-- Reads `Blatt / sheets` from each document row in the Word template.
-- Links Word rows and PDFs through their matched Excel row, then compares the Word sheet count with the actual PDF page count.
-- Can run **Word vs Excel without PDFs**. The GUI displays a warning and the report records that page-count verification was unavailable.
-- Word comparison starts automatically when a Word file is selected; there is no checkbox.
-- The standard Word template no longer needs a mapping JSON or preview step.
-- The GUI was rebuilt as a cleaner dark control-panel interface with cyan accents.
+- The Excel report now contains only two focused sheets: `Overview` and `Issues`.
+- Identifiers and technical values are compared strictly, character-for-character after removing only layout artifacts such as line breaks and surrounding whitespace.
+- Meaningful characters are preserved, including prefixes, asterisks, hyphens, case and leading zeros. For example, `EE******` remains `EE******`, and `01` is different from `1`.
+- Only three fields use explicit conversion rules:
+  - PDF language-country codes are compared with the Excel language code.
+  - Ausgabe month/year formats are converted for comparison.
+  - Word `Blatt / sheets` is interpreted as a page count and compared with the actual PDF page count.
+- Japanese uses the local Excel code `jp`; both `ja_JP` and `jp_JP` from a PDF compare to `jp`.
+- `Zulassungs-relevant / approval-relevant` and all other out-of-scope Word columns are ignored.
+- The interface keeps the control-panel layout but uses a light graphite/cyan appearance and opens maximized on Windows.
+- Preview and custom Word-mapping controls are no longer exposed in the GUI or normal CLI workflow.
 
 ## Validation modes
 
@@ -30,7 +34,7 @@ For each PDF, the tool opens visible page `2`, extracts the fixed metadata table
 
 ### Word + Excel
 
-The tool automatically reads the standard 13-column change-notice template:
+The standard 13-column change-notice template is recognized automatically. The tool reads only:
 
 - top-right `Number` → Excel `Freigabe-/ Änd.-Nr.`
 - `Artikel-Nr. / part no.` → Excel `Artikel-Nr.`
@@ -39,11 +43,29 @@ The tool automatically reads the standard 13-column change-notice template:
 - document-group `Vers neu/new` → Excel `Vers.`
 - `Blatt / sheets` → actual PDF page count when PDFs are supplied
 
-Drawing-only revision columns, old values, Format, disposal, approval relevance, and description are ignored.
+Drawing-only revision columns, old values, Format, disposal, approval relevance and description are ignored.
 
 ### Word + Excel without PDFs
 
-This mode is supported. Word rows are compared with Excel normally, while every page-count result is marked `UNAVAILABLE_NO_PDFS`. The GUI asks for confirmation before proceeding.
+This mode is supported. Word rows are compared with Excel normally. The GUI warns before the run, and the report records a single run limitation explaining that the true PDF page count could not be verified.
+
+## Report sheets
+
+### `Overview`
+
+One compact document-level table showing:
+
+- overall status
+- Excel row and document identifiers
+- linked PDF file and Word row
+- PDF-vs-Excel and Word-vs-Excel status
+- PDF Ausgabe and expected Ausgabe
+- Word sheet count and actual PDF page count
+- a concise issue summary
+
+### `Issues`
+
+Only warnings, mismatches, missing records and run limitations are listed. Values are shown exactly as read from each source; generic normalized-value columns are not included.
 
 ## Install or update from GitHub
 
@@ -57,7 +79,7 @@ Check the installed version:
 py -c "import importlib.metadata as m; print(m.version('profile-docs-checker'))"
 ```
 
-It should print `1.3.0`.
+It should print `1.4.0`.
 
 ## Run the GUI
 
@@ -89,7 +111,7 @@ PDF and Excel:
 profile-docs-checker --pdf-folder "C:\PDFs" --excel "C:\master.xlsx" --out "C:\report.xlsx" --ausgabe 07.2026
 ```
 
-PDF, Excel, and Word:
+PDF, Excel and Word:
 
 ```powershell
 profile-docs-checker --pdf-folder "C:\PDFs" --excel "C:\master.xlsx" --word "C:\docs\change-notice.docx" --out "C:\report.xlsx" --ausgabe 07.2026
@@ -101,29 +123,9 @@ Word and Excel without PDFs:
 profile-docs-checker --excel "C:\master.xlsx" --word "C:\docs\change-notice.docx" --out "C:\report.xlsx"
 ```
 
-## Report sheets
-
-Depending on selected inputs, the report contains:
-
-- `Summary`
-- `Detailed comparison`
-- `Extracted PDF values`
-- `Candidate rows`
-- `Excel rows not matched`
-- `Word vs Excel Summary`
-- `Word vs Excel Details`
-- `Word page count`
-- `Extracted Word values`
-- `Word template info`
-- `Word candidate rows`
-- `Excel rows not in Word`
-- `Run info`
-
-The `Word page count` sheet shows the Word value, normalized page count, matched PDF, actual PDF pages, result, and explanation.
-
 ## Notes
 
 - Word input must be `.docx`, not legacy `.doc`.
 - Keep source files on a local disk while running.
 - Close the output report in Excel before overwriting it.
-- Do not upload real client PDFs, Excel files, or Word files to a public repository.
+- Do not upload real client PDFs, Excel files or Word files to a public repository.

@@ -45,8 +45,8 @@ def make_change_notice(path: Path):
     table.cell(3, 8).text = "Vers neu/new"
 
     rows = [
-        ("ART-123", "DN-100", "01", "02", "3"),  # page-count mismatch (PDF has 2 pages)
-        ("ART-222", "DN-200", "1", "1", "2"),    # change number differs in Excel
+        ("ART-123", "EE******", "01", "02", "3"),  # page mismatch; PDF has 2 pages
+        ("ART-222", "DN-200", "1", "1", "2"),      # top-right number differs from Excel FR-2
     ]
     for row_idx, (article, doc_no, rev_new, vers_new, sheets) in enumerate(rows, start=4):
         table.cell(row_idx, 0).text = article
@@ -76,8 +76,9 @@ def run_change_notice_test():
         "seiten": 9,
     }
     assert info.change_number_raw == "FR-1"
-    assert records[0].values_norm["revision"] == "1"
-    assert records[0].values_norm["version"] == "2"
+    assert records[0].values_norm["revision"] == "01"
+    assert records[0].values_norm["version"] == "02"
+    assert "zulassungs" not in records[0].values_raw
 
     out = base / "validation_report_auto_word.xlsx"
     run_validation(
@@ -91,25 +92,12 @@ def run_change_notice_test():
     )
     assert out.exists()
     wb = load_workbook(out, read_only=True, data_only=True)
-    for sheet in [
-        "Word vs Excel Summary",
-        "Word vs Excel Details",
-        "Extracted Word values",
-        "Word template info",
-        "Excel rows not in Word",
-    ]:
-        assert sheet in wb.sheetnames
-    statuses = [row[2] for row in wb["Word vs Excel Summary"].iter_rows(min_row=2, values_only=True)]
-    assert "WORD_PAGE_COUNT_MISMATCH" in statuses
-    assert "WORD_CHANGE_NUMBER_MISMATCH" in statuses
-    page_rows = list(wb["Word page count"].iter_rows(min_row=2, values_only=True))
-    assert any(row[8] == "MISMATCH" for row in page_rows)
-    assert any(row[8] in {"OK", "OK_NORMALIZED"} for row in page_rows)
-    info_values = {
-        row[0]: row[1]
-        for row in wb["Word template info"].iter_rows(min_row=2, values_only=True)
-    }
-    assert info_values["Top-right Number raw"] == "FR-1"
+    assert wb.sheetnames == ["Overview", "Issues"]
+    issues = list(wb["Issues"].iter_rows(min_row=5, values_only=True))
+    assert any(row[5] == "Word vs PDF" and row[6] == "Blatt / sheets" for row in issues)
+    assert any(row[5] == "Word vs Excel" and row[6] == "Freigabe-/Änd.-Nr." for row in issues)
+    flattened = [value for row in issues for value in row if value is not None]
+    assert not any("approval relevant" in str(value).casefold() for value in flattened)
     wb.close()
     print("Automatic change-notice Word test passed.")
     print("Sample report:", out)

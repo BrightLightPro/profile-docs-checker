@@ -33,12 +33,11 @@ def run_word_only_test():
     assert out.exists()
 
     wb = load_workbook(out, read_only=True, data_only=True)
-    assert "Word page count" in wb.sheetnames
-    page_results = [row[8] for row in wb["Word page count"].iter_rows(min_row=2, values_only=True)]
-    assert page_results and set(page_results) == {"UNAVAILABLE_NO_PDFS"}
-    run_info = {row[0]: row[1] for row in wb["Run info"].iter_rows(min_row=2, values_only=True)}
-    assert run_info["PDF folder provided"] == "No"
-    assert "Unavailable" in run_info["Page-count verification"]
+    assert wb.sheetnames == ["Overview", "Issues"]
+    overview = list(wb["Overview"].iter_rows(min_row=10, values_only=True))
+    assert any(row[14] == "Unavailable — no PDFs" for row in overview if row[6])
+    issues = list(wb["Issues"].iter_rows(min_row=5, values_only=True))
+    assert any(row[1] == "Run limitation" and row[5] == "Page-count verification" for row in issues)
     wb.close()
     print("Word-only validation test passed.")
 

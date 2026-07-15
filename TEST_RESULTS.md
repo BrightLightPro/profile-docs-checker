@@ -1,52 +1,71 @@
-# Test results — Profile Docs Checker 1.3.0
+# Test results — Profile Docs Checker 1.4.0
 
-Tested locally with generated, non-confidential PDF, Excel, and Word fixtures.
+Tested locally with generated, non-confidential PDF, Excel and Word fixtures.
 
-## PDF/Excel regression
+## Strict-value PDF/Excel tests
 
 Passed:
 
 - selectable PDF extraction from visible page 2
 - extraction independent of PDF label language
-- Sprache normalization such as `de_DE` → `de`
-- Ausgabe normalization for dot, hyphen, slash, year-first, and month-name formats
-- exact, missing, and duplicate DOK-ID strategies
-- field and Ausgabe mismatch reporting
+- exact preservation and comparison of `EE******`
+- exact revision/version behavior: `01` is not silently converted to `1`
+- language conversion such as `de_DE` → Excel `de`
+- Japanese conversion `ja_JP` and `jp_JP` → Excel `jp`
+- Ausgabe comparison across dot, hyphen, slash, year-first and month-name formats
+- exact, missing and duplicate DOK-ID strategies
 - actual PDF page-count capture
-- Excel report generation
+
+## Compact report tests
+
+Passed:
+
+- exactly two sheets: `Overview` and `Issues`
+- document-level Overview rows
+- Issues contains only warnings, mismatches, missing records and run limitations
+- raw source values are displayed without generic normalized columns
+- approval-relevant and other out-of-scope Word columns are absent from the report
 
 ## Standard Word change-notice template
 
 Passed with a synthetic 13-column `.docx` containing merged bilingual headers:
 
-- automatic template recognition without a mapping JSON
-- correct selection of Artikel-Nr., Dokument-Nr., document `Rev neu`, and document `Vers neu`
-- correct exclusion of the drawing-only revision columns
+- automatic template recognition
+- correct selection of Artikel-Nr., Dokument-Nr., document `Rev neu` and document `Vers neu`
+- correct exclusion of drawing-only revisions and approval relevance
 - top-right Number extraction
-- `Blatt / sheets` detection at column 9
+- `Blatt / sheets` detection
 - Word/Excel comparison
 - actual PDF page count vs Word sheets comparison
-- page-count mismatch status and report details
+- page-count and change-number mismatch reporting
 
 ## Word-only mode
 
 Passed:
 
-- Excel + Word validation with no PDF folder
+- Excel + Word validation without a PDF folder
 - no Ausgabe requirement when PDFs are absent
-- report creation with zero PDF rows
-- `UNAVAILABLE_NO_PDFS` for every Word page-count check
-- Run-info warning that true page counts were unavailable
+- one clear run-limitation warning for unavailable true page counts
+- Overview page status `Unavailable — no PDFs`
 
-## Custom Word mapping regression
+## Backward compatibility
 
-Passed to preserve backward compatibility for command-line users with non-standard Word tables.
+The internal custom Word-mapping functions still pass regression tests, although those controls are no longer exposed in the simplified interface.
 
-## GUI smoke and visual review
+## GUI smoke test
 
 Passed under a virtual display:
 
 - GUI imports and opens successfully
-- redesigned dark graphite/cyan interface renders without overlapping controls
-- removed advanced PDF controls, preview controls, Word checkbox, and Word mapping controls
-- Word-only limitation warning is implemented before execution
+- light graphite/cyan control-panel appearance
+- initial window size is at least 1040 × 690
+- Windows launch path requests maximized state
+- all main inputs, actions and the system log are present without advanced mapping/preview controls
+
+## Package installation test
+
+Passed:
+
+- source package installs as `profile-docs-checker==1.4.0`
+- simplified CLI help exposes only Excel, optional PDFs, optional Word, Ausgabe, sheet and output
+- installed CLI completed a six-PDF validation and created the two-sheet report

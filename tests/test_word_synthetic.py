@@ -25,9 +25,9 @@ def run_word_synthetic_test():
     for i, header in enumerate(headers):
         table.rows[0].cells[i].text = header
     rows = [
-        ["de", "DN-100", "DOC-001", "FR-1", "ART-123", "1", "2"],
+        ["de", "EE******", "DOC-001", "FR-1", "ART-123", "01", "02"],
         ["en", "DN-200", "DOC-002", "FR-2", "ART-222", "1", "1"],
-        ["fr", "DN-400", "DOC-WRONG", "FR-5", "ART-555", "3", "2"],
+        ["fr", "DN-400", "DOC-WRONG", "FR-5", "ART-555", "03", "02"],
     ]
     for row in rows:
         cells = table.add_row().cells
@@ -44,7 +44,7 @@ def run_word_synthetic_test():
     word_mapping = load_word_mapping(mapping)
     word_records = extract_word_records(word, word_mapping)
     assert len(word_records) == 3
-    assert word_records[0].values_norm["dok_id"] == "doc-001"
+    assert word_records[0].values_norm["dok_id"] == "DOC-001"
 
     out = base / "validation_report_with_word.xlsx"
     run_validation(
@@ -59,12 +59,9 @@ def run_word_synthetic_test():
     )
     assert out.exists()
     wb = load_workbook(out, read_only=True, data_only=True)
-    for sheet in ["Word vs Excel Summary", "Word vs Excel Details", "Extracted Word values", "Excel rows not in Word"]:
-        assert sheet in wb.sheetnames
-    ws = wb["Word vs Excel Summary"]
-    statuses = [row[2] for row in ws.iter_rows(min_row=2, values_only=True)]
-    assert "WORD_OK" in statuses
-    assert "WORD_LIKELY_WRONG_DOK_ID" in statuses
+    assert wb.sheetnames == ["Overview", "Issues"]
+    issues = list(wb["Issues"].iter_rows(min_row=5, values_only=True))
+    assert any(row[5] == "Word matching" and "DOK-ID" in str(row[11]) for row in issues)
     wb.close()
     print("Word synthetic test passed.")
     print("Sample report:", out)
