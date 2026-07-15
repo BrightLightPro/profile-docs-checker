@@ -45,14 +45,15 @@ def make_change_notice(path: Path):
     table.cell(3, 8).text = "Vers neu/new"
 
     rows = [
-        ("ART-123", "DN-100", "01", "02"),  # all correct after normalization
-        ("ART-222", "DN-200", "1", "1"),    # change number differs in Excel
+        ("ART-123", "DN-100", "01", "02", "3"),  # page-count mismatch (PDF has 2 pages)
+        ("ART-222", "DN-200", "1", "1", "2"),    # change number differs in Excel
     ]
-    for row_idx, (article, doc_no, rev_new, vers_new) in enumerate(rows, start=4):
+    for row_idx, (article, doc_no, rev_new, vers_new, sheets) in enumerate(rows, start=4):
         table.cell(row_idx, 0).text = article
         table.cell(row_idx, 3).text = doc_no
         table.cell(row_idx, 7).text = rev_new
         table.cell(row_idx, 8).text = vers_new
+        table.cell(row_idx, 9).text = sheets
 
     doc.save(path)
 
@@ -72,6 +73,7 @@ def run_change_notice_test():
         "dokumentnummer": 3,
         "revision": 7,
         "version": 8,
+        "seiten": 9,
     }
     assert info.change_number_raw == "FR-1"
     assert records[0].values_norm["revision"] == "1"
@@ -98,8 +100,11 @@ def run_change_notice_test():
     ]:
         assert sheet in wb.sheetnames
     statuses = [row[2] for row in wb["Word vs Excel Summary"].iter_rows(min_row=2, values_only=True)]
-    assert "WORD_OK_WITH_NORMALIZATION" in statuses
+    assert "WORD_PAGE_COUNT_MISMATCH" in statuses
     assert "WORD_CHANGE_NUMBER_MISMATCH" in statuses
+    page_rows = list(wb["Word page count"].iter_rows(min_row=2, values_only=True))
+    assert any(row[8] == "MISMATCH" for row in page_rows)
+    assert any(row[8] in {"OK", "OK_NORMALIZED"} for row in page_rows)
     info_values = {
         row[0]: row[1]
         for row in wb["Word template info"].iter_rows(min_row=2, values_only=True)

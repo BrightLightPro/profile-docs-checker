@@ -11,5 +11,5 @@
     "revision": 5,
     "version": 6
   },
-  "_instructions": "Edit columns_by_index_zero_based locally if needed. Indexes are zero-based: the first Word table column is 0, the second is 1, etc. Leave a field as null to ignore it."
+  "_instructions": "This mapping is only needed for non-standard Word tables. The Freigabe-/Änderungsmitteilung / Engineering Change Notice template is recognized automatically without a mapping file. Indexes are zero-based; leave a field null to ignore it."
 }

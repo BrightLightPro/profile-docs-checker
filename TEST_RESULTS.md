@@ -1,52 +1,52 @@
-# Test results — Profile Docs Checker 1.2.0
+# Test results — Profile Docs Checker 1.3.0
 
-Tested locally with generated, non-confidential files.
+Tested locally with generated, non-confidential PDF, Excel, and Word fixtures.
 
-## PDF/Excel regression test
+## PDF/Excel regression
 
 Passed:
 
 - selectable PDF extraction from visible page 2
-- multilingual PDF labels ignored through row-position extraction
-- language normalization such as `de_DE` → `de`
-- Ausgabe forms `07.2026`, `07-2026`, `07/2026`, year-first, and month names
-- exact DOK-ID match
-- mismatching field report
-- likely wrong DOK-ID fallback
-- duplicate DOK-ID resolution
-- Ausgabe mismatch
+- extraction independent of PDF label language
+- Sprache normalization such as `de_DE` → `de`
+- Ausgabe normalization for dot, hyphen, slash, year-first, and month-name formats
+- exact, missing, and duplicate DOK-ID strategies
+- field and Ausgabe mismatch reporting
+- actual PDF page-count capture
 - Excel report generation
 
-## Existing custom Word-mapping regression test
+## Standard Word change-notice template
 
-Passed:
+Passed with a synthetic 13-column `.docx` containing merged bilingual headers:
 
-- Word inspector JSON generation
-- custom mapping loading
-- custom Word row extraction
-- DOK-ID-based matching and wrong-DOK-ID handling
-- Word report sheets
-
-## Automatic change-notice Word-template test
-
-A synthetic `.docx` reproducing the shared template structure was generated with:
-
-- 13 logical columns
-- merged bilingual title and header cells
-- top-right Number
-- separate old/new drawing revision columns
-- `Dokument-Nr.`
-- `Rev neu/new` and `Vers neu/new` under the document group
-
-Passed:
-
-- automatic template recognition without JSON
-- correct detection of columns 0, 3, 7, and 8
-- correct exclusion of the drawing-only `Rev neu/new` column
+- automatic template recognition without a mapping JSON
+- correct selection of Artikel-Nr., Dokument-Nr., document `Rev neu`, and document `Vers neu`
+- correct exclusion of the drawing-only revision columns
 - top-right Number extraction
-- wrapped/merged Word-header handling
-- revision/version normalization
-- Word Number vs Excel Freigabe-/Änd.-Nr. mismatch reporting
-- `Word template info` report sheet
+- `Blatt / sheets` detection at column 9
+- Word/Excel comparison
+- actual PDF page count vs Word sheets comparison
+- page-count mismatch status and report details
 
-Generated sample report: `test_output/validation_report_auto_word.xlsx`.
+## Word-only mode
+
+Passed:
+
+- Excel + Word validation with no PDF folder
+- no Ausgabe requirement when PDFs are absent
+- report creation with zero PDF rows
+- `UNAVAILABLE_NO_PDFS` for every Word page-count check
+- Run-info warning that true page counts were unavailable
+
+## Custom Word mapping regression
+
+Passed to preserve backward compatibility for command-line users with non-standard Word tables.
+
+## GUI smoke and visual review
+
+Passed under a virtual display:
+
+- GUI imports and opens successfully
+- redesigned dark graphite/cyan interface renders without overlapping controls
+- removed advanced PDF controls, preview controls, Word checkbox, and Word mapping controls
+- Word-only limitation warning is implemented before execution

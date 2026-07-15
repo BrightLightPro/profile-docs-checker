@@ -42,6 +42,7 @@ PDF_FIELD_DISPLAY = {
     "revision": "Revision",
     "version": "Version",
     "ausgabe": "Ausgabe",
+    "seiten": "Blatt / sheets",
 }
 
 # The row order inside the fixed PDF table. Row 0 = Dokumentname, ignored.
@@ -138,6 +139,7 @@ class ExtractedPDF:
     row_start: Optional[int] = None  # 1-based row where Dokumentname starts within detected table.
     error: Optional[str] = None
     warnings: List[str] = field(default_factory=list)
+    total_pages: Optional[int] = None
 
 
 @dataclass
@@ -222,6 +224,13 @@ class WordValidationResult:
     issues: List[str] = field(default_factory=list)
     comparisons: List[WordFieldComparison] = field(default_factory=list)
     candidate_rows: List[Tuple[int, float]] = field(default_factory=list)
+    excel_status: str = ""
+    page_count_result: str = "NOT_CHECKED"
+    word_pages_raw: str = ""
+    word_pages_norm: str = ""
+    pdf_pages: Optional[int] = None
+    pdf_file_name: str = ""
+    page_count_issue: str = ""
 
 
 WORD_STATUS_ORDER = {
@@ -237,6 +246,8 @@ WORD_STATUS_ORDER = {
     "WORD_AMBIGUOUS_MATCH": 9,
     "WORD_NO_RELIABLE_MATCH": 10,
     "WORD_TABLE_NOT_RECOGNIZED": 11,
+    "WORD_PAGE_COUNT_MISMATCH": 7,
+    "WORD_MULTIPLE_MISMATCHES": 8,
     "WORD_EXTRACTION_ERROR": 12,
 }
 
@@ -296,6 +307,24 @@ def normalize_revision_version(value: object) -> str:
     if re.fullmatch(r"0*\d+", text):
         return str(int(text))
     return text
+
+
+def normalize_page_count(value: object) -> str:
+    """Normalize a Word sheet/page count to a positive integer string."""
+    text = clean_text(value)
+    if not text:
+        return ""
+    # Common forms: 3, 03, 3 pages, 3 Blatt.
+    m = re.fullmatch(r"0*(\d+)(?:\s*(?:pages?|sheets?|blatt|seiten?))?", text, flags=re.I)
+    if m:
+        number = int(m.group(1))
+    else:
+        # Also accept a sheet position that includes a total, e.g. 1/3 or 1 of 3.
+        total = re.fullmatch(r"0*\d+\s*(?:/|of|von)\s*0*(\d+)", text, flags=re.I)
+        if not total:
+            return ""
+        number = int(total.group(1))
+    return str(number) if number > 0 else ""
 
 
 def _normalize_month_number(month: int, year: int) -> Optional[str]:
@@ -370,6 +399,8 @@ def normalize_field(field_name: str, value: object) -> str:
         return normalize_revision_version(value)
     if field_name == "ausgabe":
         return normalize_month_year(value)
+    if field_name == "seiten":
+        return normalize_page_count(value)
     return normalize_identifier(value)
 
 
@@ -561,6 +592,7 @@ def extract_pdf_table(
         if not pdf_path.exists():
             raise FileNotFoundError(str(pdf_path))
         doc = fitz.open(pdf_path)
+        result.total_pages = len(doc)
         try:
             if page_number < 1 or page_number > len(doc):
                 raise ValueError(f"PDF has {len(doc)} pages; requested page {page_number}.")
@@ -598,7 +630,9 @@ def extract_pdf_table(
             if not candidates:
                 raise ValueError("No readable table rows found on the configured page.")
             _score, chosen_idx, rows = max(candidates, key=lambda x: x[0])
-            return _extract_from_table_rows(rows, pdf_path, page_number, chosen_idx, row_start)
+            extracted = _extract_from_table_rows(rows, pdf_path, page_number, chosen_idx, row_start)
+            extracted.total_pages = len(doc)
+            return extracted
         finally:
             doc.close()
     except Exception as exc:
@@ -827,7 +861,8 @@ WORD_CUSTOM_COMPARISON_FIELDS = [
     "sprache", "dokumentnummer", "dok_id", "freigabe", "artikelnummer", "revision", "version"
 ]
 WORD_TEMPLATE_COMPARISON_FIELDS = ["dokumentnummer", "artikelnummer", "revision", "version", "freigabe"]
-WORD_REPORT_FIELDS = ["dokumentnummer", "artikelnummer", "revision", "version", "freigabe", "dok_id", "sprache"]
+WORD_REPORT_FIELDS = ["dokumentnummer", "artikelnummer", "revision", "version", "freigabe", "seiten", "dok_id", "sprache"]
+WORD_EXCEL_COMPARISON_FIELDS = ["dokumentnummer", "artikelnummer", "revision", "version", "freigabe", "dok_id", "sprache"]
 WORD_COMPARISON_FIELDS = WORD_CUSTOM_COMPARISON_FIELDS  # Backward-compatible public name.
 WORD_MATCH_WEIGHTS = {
     "dokumentnummer": 60,
@@ -1126,6 +1161,7 @@ def _detect_change_notice_table(table, table_index: int) -> Optional[Dict[str, A
     doc_hits: List[Tuple[int, int]] = []
     rev_new_hits: List[Tuple[int, int]] = []
     vers_new_hits: List[Tuple[int, int]] = []
+    sheets_hits: List[Tuple[int, int]] = []
     title_hits: List[Tuple[int, int]] = []
 
     for r_idx, row in enumerate(rows[: min(12, len(rows))]):
@@ -1143,6 +1179,8 @@ def _detect_change_notice_table(table, table_index: int) -> Optional[Dict[str, A
                 rev_new_hits.append((r_idx, c_idx))
             if _has_any(key, ["versneunew", "versnew", "versneu", "versionnew"]):
                 vers_new_hits.append((r_idx, c_idx))
+            if _has_any(key, ["blattsheets", "sheets", "blatt", "pages", "seiten"]):
+                sheets_hits.append((r_idx, c_idx))
 
     if not article_hits or not doc_hits or not rev_new_hits or not vers_new_hits:
         return None
@@ -1158,13 +1196,16 @@ def _detect_change_notice_table(table, table_index: int) -> Optional[Dict[str, A
     vers_row, vers_col = min(vers_after, key=lambda item: item[1])
     if rev_col == vers_col:
         return None
+    sheets_after = [hit for hit in sheets_hits if hit[1] > vers_col]
+    sheets_row, sheets_col = min(sheets_after, key=lambda item: item[1]) if sheets_after else (-1, -1)
 
-    header_rows = sorted(set([article_row, doc_row, rev_row, vers_row] + [r for r, _ in title_hits]))
-    detail_header_rows = sorted(set([article_row, doc_row, rev_row, vers_row]))
+    extra_rows = [sheets_row] if sheets_row >= 0 else []
+    header_rows = sorted(set([article_row, doc_row, rev_row, vers_row] + extra_rows + [r for r, _ in title_hits]))
+    detail_header_rows = sorted(set([article_row, doc_row, rev_row, vers_row] + extra_rows))
     data_start = max(detail_header_rows) + 1
     while data_start < len(rows):
         row = rows[data_start]
-        check_cols = [article_col, doc_col, rev_col, vers_col]
+        check_cols = [article_col, doc_col, rev_col, vers_col] + ([sheets_col] if sheets_col >= 0 else [])
         if any(clean_text(row[c]) for c in check_cols if c < len(row)):
             break
         data_start += 1
@@ -1181,9 +1222,10 @@ def _detect_change_notice_table(table, table_index: int) -> Optional[Dict[str, A
             "dokumentnummer": doc_col,
             "revision": rev_col,
             "version": vers_col,
+            **({"seiten": sheets_col} if sheets_col >= 0 else {}),
         },
         "change_number_raw": change_raw,
-        "warnings": warnings,
+        "warnings": warnings + ([] if sheets_col >= 0 else ["The Blatt / sheets column was not detected; PDF page-count comparison will be unavailable."]),
     }
 
 
@@ -1381,7 +1423,7 @@ def validate_one_word_record(
     result.matched_excel_row = matched_record.row_number if matched_record else None
     comps: List[WordFieldComparison] = []
     if matched_record:
-        for field_name in WORD_REPORT_FIELDS:
+        for field_name in WORD_EXCEL_COMPARISON_FIELDS:
             if field_name not in word_record.values_raw:
                 continue
             comps.append(compare_word_value(
@@ -1427,11 +1469,95 @@ def validate_word_records(
     return [validate_one_word_record(rec, records, dok_id_index) for rec in word_records]
 
 
+def apply_word_page_count_checks(
+    word_results: Sequence[WordValidationResult],
+    pdf_results: Sequence[ValidationResult],
+    pdfs_available: bool,
+) -> None:
+    """Compare Word Blatt/sheets values with actual PDF page counts.
+
+    Word rows and PDFs are linked through the Excel row selected by the existing
+    matching logic. This avoids relying on filenames.
+    """
+    by_excel_row: Dict[int, List[ValidationResult]] = {}
+    for pdf_result in pdf_results:
+        if pdf_result.matched_excel_row and pdf_result.extracted.total_pages is not None:
+            by_excel_row.setdefault(pdf_result.matched_excel_row, []).append(pdf_result)
+
+    non_error_excel_statuses = {
+        "WORD_OK", "WORD_OK_WITH_NORMALIZATION",
+        "WORD_DUPLICATE_DOCUMENT_NUMBER_RESOLVED",
+        "WORD_LIKELY_WRONG_DOCUMENT_NUMBER", "WORD_LIKELY_WRONG_DOK_ID",
+    }
+
+    for result in word_results:
+        result.excel_status = result.status
+        result.word_pages_raw = clean_text(result.record.values_raw.get("seiten", ""))
+        result.word_pages_norm = normalize_page_count(result.word_pages_raw)
+
+        if not pdfs_available:
+            result.page_count_result = "UNAVAILABLE_NO_PDFS"
+            result.page_count_issue = "No PDF folder was provided, so the true number of pages could not be verified."
+            result.issues.append(result.page_count_issue)
+            continue
+        if not result.matched_excel_row:
+            result.page_count_result = "UNAVAILABLE_NO_EXCEL_MATCH"
+            result.page_count_issue = "The Word row was not matched to Excel, so it could not be linked to a PDF."
+            result.issues.append(result.page_count_issue)
+            continue
+        if not result.word_pages_raw:
+            result.page_count_result = "WORD_PAGE_COUNT_MISSING"
+            result.page_count_issue = "The Word Blatt / sheets cell is empty."
+            result.issues.append(result.page_count_issue)
+            continue
+        if not result.word_pages_norm:
+            result.page_count_result = "WORD_PAGE_COUNT_UNSUPPORTED"
+            result.page_count_issue = f"The Word Blatt / sheets value could not be interpreted: {result.word_pages_raw!r}."
+            result.issues.append(result.page_count_issue)
+            continue
+
+        candidates = by_excel_row.get(result.matched_excel_row, [])
+        if not candidates:
+            result.page_count_result = "PDF_NOT_FOUND"
+            result.page_count_issue = "No successfully matched PDF was found for this Excel row."
+            result.issues.append(result.page_count_issue)
+            continue
+
+        counts = sorted({c.extracted.total_pages for c in candidates if c.extracted.total_pages is not None})
+        files = sorted(c.extracted.file_name for c in candidates)
+        result.pdf_file_name = "; ".join(files)
+        if len(counts) > 1:
+            result.page_count_result = "AMBIGUOUS_PDF_PAGE_COUNT"
+            result.page_count_issue = (
+                "Several PDFs matched the same Excel row but have different page counts: "
+                + ", ".join(str(v) for v in counts)
+            )
+            result.issues.append(result.page_count_issue)
+            continue
+
+        result.pdf_pages = counts[0]
+        if int(result.word_pages_norm) == result.pdf_pages:
+            result.page_count_result = "OK" if result.word_pages_raw == str(result.pdf_pages) else "OK_NORMALIZED"
+            if len(candidates) > 1:
+                result.page_count_issue = "Several PDFs matched this Excel row, but all have the same page count."
+                result.issues.append(result.page_count_issue)
+        else:
+            result.page_count_result = "MISMATCH"
+            result.page_count_issue = (
+                f"Word Blatt / sheets is {result.word_pages_raw}, but the matched PDF has {result.pdf_pages} page(s)."
+            )
+            result.issues.append(result.page_count_issue)
+            if result.excel_status in non_error_excel_statuses:
+                result.status = "WORD_PAGE_COUNT_MISMATCH"
+            else:
+                result.status = "WORD_MULTIPLE_MISMATCHES"
+
+
 def run_validation(
-    pdf_folder: Path | str,
+    pdf_folder: Optional[Path | str],
     excel_path: Path | str,
     output_path: Path | str,
-    expected_ausgabe: str,
+    expected_ausgabe: Optional[str],
     sheet_name: Optional[str] = None,
     page_number: int = 2,
     table_index: Optional[int] = None,
@@ -1440,7 +1566,18 @@ def run_validation(
     word_mapping_path: Optional[Path | str] = None,
     progress_callback=None,
 ) -> List[ValidationResult]:
-    expected_norm = normalize_expected_ausgabe(expected_ausgabe)
+    has_pdf_folder = bool(clean_text(pdf_folder))
+    has_word = bool(clean_text(word_docx_path))
+    if not has_pdf_folder and not has_word:
+        raise ValueError("Choose a PDF folder, a Word file, or both.")
+
+    expected_input = clean_text(expected_ausgabe)
+    expected_norm = ""
+    if has_pdf_folder:
+        if not expected_input:
+            raise ValueError("Expected Ausgabe is required when a PDF folder is selected.")
+        expected_norm = normalize_expected_ausgabe(expected_input)
+
     if progress_callback:
         progress_callback("Loading Excel...")
     records, actual_sheet, header_row, columns = load_excel_records(excel_path, sheet_name)
@@ -1449,25 +1586,29 @@ def run_validation(
     if progress_callback:
         progress_callback(f"Loaded {len(records)} Excel rows from sheet '{actual_sheet}' using header row {header_row}.")
     dok_idx = build_dok_id_index(records)
-    pdfs = list_pdf_files(pdf_folder)
-    if not pdfs:
-        raise ValueError("No PDF files found in the selected folder.")
-    if progress_callback:
-        progress_callback(f"Found {len(pdfs)} PDF files.")
 
     results: List[ValidationResult] = []
-    for i, pdf in enumerate(pdfs, start=1):
+    pdfs: List[Path] = []
+    if has_pdf_folder:
+        pdfs = list_pdf_files(pdf_folder)
+        if not pdfs:
+            raise ValueError("No PDF files found in the selected folder.")
         if progress_callback:
-            progress_callback(f"Processing {i}/{len(pdfs)}: {pdf.name}")
-        extracted = extract_pdf_table(pdf, page_number=page_number, table_index=table_index, row_start=row_start)
-        res = validate_one_pdf(extracted, records, dok_idx, expected_ausgabe, expected_norm)
-        results.append(res)
+            progress_callback(f"Found {len(pdfs)} PDF files.")
+        for i, pdf in enumerate(pdfs, start=1):
+            if progress_callback:
+                progress_callback(f"Processing PDF {i}/{len(pdfs)}: {pdf.name}")
+            extracted = extract_pdf_table(pdf, page_number=page_number, table_index=table_index, row_start=row_start)
+            res = validate_one_pdf(extracted, records, dok_idx, expected_input, expected_norm)
+            results.append(res)
+    elif progress_callback:
+        progress_callback("No PDF folder selected. PDF metadata and true page counts will not be checked.")
 
     word_records: Optional[List[WordRecord]] = None
     word_results: Optional[List[WordValidationResult]] = None
     word_mapping: Optional[WordMapping] = None
     word_info: Optional[WordExtractionInfo] = None
-    if word_docx_path:
+    if has_word:
         if progress_callback:
             if word_mapping_path:
                 progress_callback("Loading Word table with custom mapping...")
@@ -1494,6 +1635,7 @@ def run_validation(
                 progress_callback(f"Word change-notice Number: {word_info.change_number_raw}")
             progress_callback("Comparing Word rows with Excel...")
         word_results = validate_word_records(word_records, records, dok_idx)
+        apply_word_page_count_checks(word_results, results, pdfs_available=has_pdf_folder)
         if progress_callback:
             word_counts: Dict[str, int] = {}
             for word_result in word_results:
@@ -1516,7 +1658,7 @@ def run_validation(
         results,
         records,
         output_path,
-        expected_ausgabe,
+        expected_input,
         expected_norm,
         actual_sheet,
         word_results=word_results,
@@ -1524,6 +1666,7 @@ def run_validation(
         word_mapping=word_mapping,
         word_extraction_info=word_info,
         word_docx_path=word_docx_path,
+        pdf_folder_provided=has_pdf_folder,
     )
     if progress_callback:
         progress_callback(f"Done. Report saved to: {output_path}")
@@ -1562,6 +1705,8 @@ def _status_fill(status: str) -> PatternFill:
         "WORD_CHANGE_NUMBER_MISMATCH": "FCE4D6",
         "WORD_FIELD_MISMATCH": "FFC7CE",
         "WORD_FIELD_AND_CHANGE_NUMBER_MISMATCH": "FF9999",
+        "WORD_PAGE_COUNT_MISMATCH": "FFC7CE",
+        "WORD_MULTIPLE_MISMATCHES": "FF9999",
         "WORD_DOCUMENT_NOT_IN_EXCEL": "F4CCCC",
         "WORD_AMBIGUOUS_MATCH": "F4CCCC",
         "WORD_NO_RELIABLE_MATCH": "F4CCCC",
@@ -1608,6 +1753,7 @@ def write_report(
     word_mapping: Optional[WordMapping] = None,
     word_extraction_info: Optional[WordExtractionInfo] = None,
     word_docx_path: Optional[Path | str] = None,
+    pdf_folder_provided: bool = True,
 ):
     output_path = Path(output_path)
     wb = Workbook()
@@ -1616,6 +1762,7 @@ def write_report(
     ws.append([
         "PDF file",
         "Status",
+        "Total PDF pages",
         "Confidence",
         "Excel row",
         "PDF DOK-ID",
@@ -1631,6 +1778,7 @@ def write_report(
         ws.append([
             ext.file_name,
             res.status,
+            ext.total_pages if ext.total_pages is not None else "",
             res.confidence,
             res.matched_excel_row or "",
             ext.values_raw.get("dok_id", ""),
@@ -1671,15 +1819,16 @@ def write_report(
                 details.cell(details.max_row, 10).fill = PatternFill("solid", fgColor="D9EAD3")
 
     extraction = wb.create_sheet("Extracted PDF values")
-    extraction.append(["PDF file", "Page", "Table", "Row start", "Field", "Raw value", "Normalized value", "Warnings/Error"])
+    extraction.append(["PDF file", "Total PDF pages", "Metadata page", "Table", "Row start", "Field", "Raw value", "Normalized value", "Warnings/Error"])
     for res in results:
         ext = res.extracted
         if ext.error:
-            extraction.append([ext.file_name, ext.page_number, "", "", "ERROR", "", "", ext.error])
+            extraction.append([ext.file_name, ext.total_pages if ext.total_pages is not None else "", ext.page_number, "", "", "ERROR", "", "", ext.error])
             continue
         for field_name in PDF_FIELDS:
             extraction.append([
                 ext.file_name,
+                ext.total_pages if ext.total_pages is not None else "",
                 ext.page_number,
                 ext.table_index,
                 ext.row_start,
@@ -1714,9 +1863,10 @@ def write_report(
     if word_results is not None:
         word_summary = wb.create_sheet("Word vs Excel Summary")
         word_summary.append([
-            "Word file", "Word row", "Status", "Confidence", "Excel row",
+            "Word file", "Word row", "Overall status", "Word/Excel status", "Confidence", "Excel row",
             "Word Dok.-Nr.", "Word Artikel-Nr.", "Word Rev. neu", "Word Vers. neu",
-            "Word Number", "Issues"
+            "Word Number", "Word Blatt/sheets", "Matched PDF", "Actual PDF pages",
+            "Page-count result", "Issues"
         ])
         for res in sorted(word_results, key=lambda r: (WORD_STATUS_ORDER.get(r.status, 99), r.record.word_row_number)):
             rec = res.record
@@ -1724,6 +1874,7 @@ def write_report(
                 rec.word_file_name,
                 rec.word_row_number,
                 res.status,
+                res.excel_status or res.status,
                 res.confidence,
                 res.matched_excel_row or "",
                 rec.values_raw.get("dokumentnummer", ""),
@@ -1731,6 +1882,10 @@ def write_report(
                 rec.values_raw.get("revision", ""),
                 rec.values_raw.get("version", ""),
                 rec.values_raw.get("freigabe", ""),
+                res.word_pages_raw,
+                res.pdf_file_name,
+                res.pdf_pages if res.pdf_pages is not None else "",
+                res.page_count_result,
                 "; ".join(res.issues),
             ])
             word_summary.cell(word_summary.max_row, 3).fill = _status_fill(res.status)
@@ -1764,6 +1919,31 @@ def write_report(
                     word_details.cell(word_details.max_row, 10).fill = PatternFill("solid", fgColor="FFC7CE")
                 elif comp.result == "OK_NORMALIZED":
                     word_details.cell(word_details.max_row, 10).fill = PatternFill("solid", fgColor="D9EAD3")
+
+        page_counts = wb.create_sheet("Word page count")
+        page_counts.append([
+            "Word file", "Word row", "Excel row", "Dok.-Nr.", "Word Blatt/sheets raw",
+            "Word pages normalized", "Matched PDF", "Actual PDF pages", "Result", "Details"
+        ])
+        for res in word_results:
+            page_counts.append([
+                res.record.word_file_name,
+                res.record.word_row_number,
+                res.matched_excel_row or "",
+                res.record.values_raw.get("dokumentnummer", ""),
+                res.word_pages_raw,
+                res.word_pages_norm,
+                res.pdf_file_name,
+                res.pdf_pages if res.pdf_pages is not None else "",
+                res.page_count_result,
+                res.page_count_issue,
+            ])
+            if res.page_count_result == "MISMATCH":
+                page_counts.cell(page_counts.max_row, 9).fill = PatternFill("solid", fgColor="FFC7CE")
+            elif res.page_count_result in {"OK", "OK_NORMALIZED"}:
+                page_counts.cell(page_counts.max_row, 9).fill = PatternFill("solid", fgColor="C6EFCE")
+            else:
+                page_counts.cell(page_counts.max_row, 9).fill = PatternFill("solid", fgColor="FFF2CC")
 
         word_extracted = wb.create_sheet("Extracted Word values")
         word_extracted.append(["Word file", "Word row", "Field", "Raw value", "Normalized value"])
@@ -1818,7 +1998,10 @@ def write_report(
     meta.append(["Expected Ausgabe input", expected_ausgabe])
     meta.append(["Expected Ausgabe normalized", expected_ausgabe_norm])
     meta.append(["Excel sheet", sheet_name])
+    meta.append(["PDF folder provided", "Yes" if pdf_folder_provided else "No"])
     meta.append(["PDF files processed", len(results)])
+    if not pdf_folder_provided:
+        meta.append(["Page-count verification", "Unavailable: no PDF folder was provided"])
     meta.append(["Excel records loaded", len(excel_records)])
     if word_results is not None:
         meta.append(["Word comparison", "Enabled"])
