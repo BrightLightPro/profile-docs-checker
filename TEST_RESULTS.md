@@ -1,71 +1,70 @@
-# Test results — Profile Docs Checker 1.4.0
+# Test results — Profile Docs Checker 1.5.0
 
 Tested locally with generated, non-confidential PDF, Excel and Word fixtures.
 
-## Strict-value PDF/Excel tests
+## Regression tests
 
 Passed:
 
 - selectable PDF extraction from visible page 2
-- extraction independent of PDF label language
-- exact preservation and comparison of `EE******`
-- exact revision/version behavior: `01` is not silently converted to `1`
-- language conversion such as `de_DE` → Excel `de`
-- Japanese conversion `ja_JP` and `jp_JP` → Excel `jp`
-- Ausgabe comparison across dot, hyphen, slash, year-first and month-name formats
-- exact, missing and duplicate DOK-ID strategies
-- actual PDF page-count capture
+- multilingual fixed-position PDF table extraction
+- strict preservation of values including `EE******` and leading zeros
+- language conversion including Japanese `ja_JP` / `jp_JP` → `jp`
+- Ausgabe comparison
+- missing and duplicate DOK-ID strategies
+- standard Word-template recognition
+- Word-only validation
+- actual PDF page-count comparison
+- two-sheet Excel report generation
 
-## Compact report tests
+## Top-right Number fix
 
-Passed:
+Passed with a Word fixture containing:
 
-- exactly two sheets: `Overview` and `Issues`
-- document-level Overview rows
-- Issues contains only warnings, mismatches, missing records and run limitations
-- raw source values are displayed without generic normalized columns
-- approval-relevant and other out-of-scope Word columns are absent from the report
+- the change-notice title in the wide top-left cell;
+- `(Number) FR-1` in the dedicated top-right cell;
+- a misleading code `DISTRACTOR-999` elsewhere in the header.
 
-## Standard Word change-notice template
+The extractor returned `FR-1` from row `0`, column `12` and ignored the distractor. The XML-level reader also supports text nested in content controls and text split across formatted runs.
 
-Passed with a synthetic 13-column `.docx` containing merged bilingual headers:
-
-- automatic template recognition
-- correct selection of Artikel-Nr., Dokument-Nr., document `Rev neu` and document `Vers neu`
-- correct exclusion of drawing-only revisions and approval relevance
-- top-right Number extraction
-- `Blatt / sheets` detection
-- Word/Excel comparison
-- actual PDF page count vs Word sheets comparison
-- page-count and change-number mismatch reporting
-
-## Word-only mode
+## Concise in-app summary model
 
 Passed:
 
-- Excel + Word validation without a PDF folder
-- no Ausgabe requirement when PDFs are absent
-- one clear run-limitation warning for unavailable true page counts
-- Overview page status `Unavailable — no PDFs`
+- all incorrect Word/PDF fields become concise issue rows;
+- a reliable Excel DOK-ID is attached when available;
+- the ID is intentionally omitted when the DOK-ID itself is wrong;
+- unverified page counts without PDFs become warnings;
+- all-correct runs produce no issue rows.
 
-## Backward compatibility
+## Corrected Word copy
 
-The internal custom Word-mapping functions still pass regression tests, although those controls are no longer exposed in the simplified interface.
+Passed:
+
+- original Word document remains untouched;
+- top-right Number corrected from Excel;
+- Artikel-Nr., Dokument-Nr., document Rev neu and Vers neu corrected from Excel;
+- Blatt / sheets corrected from actual PDF page count;
+- unmatched rows are skipped rather than guessed;
+- the corrected document reopens and is re-extracted with the expected values.
+
+The generated corrected fixture was rendered before and after correction. Table structure and page layout were preserved; only intended text values changed.
 
 ## GUI smoke test
 
-Passed under a virtual display:
+Passed under a virtual X display:
 
-- GUI imports and opens successfully
-- light graphite/cyan control-panel appearance
-- initial window size is at least 1040 × 690
-- Windows launch path requests maximized state
-- all main inputs, actions and the system log are present without advanced mapping/preview controls
+- GUI creates successfully;
+- concise results Treeview is present with `ID-NR.` and issue columns;
+- corrected-Word action is present and initially disabled;
+- window minimum size is sufficient to show all controls;
+- no old technical log or preview/mapping controls are present.
 
-## Package installation test
+## Installation test
 
 Passed:
 
-- source package installs as `profile-docs-checker==1.4.0`
-- simplified CLI help exposes only Excel, optional PDFs, optional Word, Ausgabe, sheet and output
-- installed CLI completed a six-PDF validation and created the two-sheet report
+- wheel/source installation as `profile-docs-checker==1.5.0`;
+- package imports successfully;
+- console entry points are generated;
+- installed synthetic validation creates the two-sheet report.

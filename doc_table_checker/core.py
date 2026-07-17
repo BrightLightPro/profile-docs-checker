@@ -191,6 +191,8 @@ class WordExtractionInfo:
     columns_by_index_zero_based: Dict[str, int] = field(default_factory=dict)
     change_number_raw: str = ""
     change_number_norm: str = ""
+    change_number_cell_row_zero_based: Optional[int] = None
+    change_number_cell_col_zero_based: Optional[int] = None
     warnings: List[str] = field(default_factory=list)
 
 
@@ -231,6 +233,15 @@ class WordValidationResult:
     pdf_pages: Optional[int] = None
     pdf_file_name: str = ""
     page_count_issue: str = ""
+
+
+@dataclass
+class WordCorrectionResult:
+    output_path: Path
+    changed_cells: int = 0
+    corrected_rows: int = 0
+    skipped_rows: int = 0
+    warnings: List[str] = field(default_factory=list)
 
 
 WORD_STATUS_ORDER = {
@@ -870,7 +881,45 @@ WORD_MATCH_WEIGHTS = {
 
 
 def _word_cell_to_text(cell) -> str:
+    """Read all visible text in a Word cell, including content controls/text boxes.
+
+    ``python-docx``'s ``cell.text`` can miss text nested inside structured document
+    tags. The change-notice Number field is often implemented that way, so read
+    every ``w:t`` descendant from the cell XML instead.
+    """
+    try:
+        paragraph_texts: List[str] = []
+        for paragraph in cell._tc.xpath(".//w:p"):
+            # Text split across styled runs belongs together; paragraph boundaries
+            # become a single technical space.
+            paragraph_text = "".join((node.text or "") for node in paragraph.xpath(".//w:t"))
+            if paragraph_text:
+                paragraph_texts.append(paragraph_text)
+        xml_text = clean_text(" ".join(paragraph_texts))
+        if xml_text:
+            return xml_text
+    except Exception:
+        pass
     return clean_text(cell.text)
+
+
+def _set_word_cell_text_preserve_structure(cell, value: object) -> None:
+    """Replace visible text while preserving the existing cell/table formatting.
+
+    Existing text nodes are reused so cell borders, shading, paragraph alignment,
+    content controls and run formatting remain in place.
+    """
+    text = clean_text(value)
+    try:
+        nodes = list(cell._tc.xpath(".//w:t"))
+    except Exception:
+        nodes = []
+    if nodes:
+        nodes[0].text = text
+        for node in nodes[1:]:
+            node.text = ""
+    else:
+        cell.text = text
 
 
 def _field_header_variants() -> Dict[str, str]:
@@ -973,6 +1022,8 @@ def inspect_word_tables(docx_path: Path | str, include_samples: bool = False, sa
                 "data_start_row_zero_based": auto_detect["data_start"],
                 "columns_by_index_zero_based": auto_detect["columns"],
                 "change_number_raw": auto_detect["change_number_raw"],
+                "change_number_cell_row_zero_based": auto_detect.get("change_number_cell_row"),
+                "change_number_cell_col_zero_based": auto_detect.get("change_number_cell_col"),
                 "warnings": auto_detect["warnings"],
             }
         result["tables"].append(payload)
@@ -1087,14 +1138,22 @@ def _has_any(key: str, terms: Sequence[str]) -> bool:
 
 def _unique_row_cells(row) -> List[Tuple[int, str, int]]:
     """Return rightmost grid index, text, and grid span for each distinct XML cell."""
+    return [(last, text, span) for _first, last, _cell, text, span in _unique_row_cell_objects(row)]
+
+
+def _unique_row_cell_objects(row) -> List[Tuple[int, int, Any, str, int]]:
+    """Return first/last grid index, cell object, text and span for distinct cells."""
     seen: Dict[int, List[Any]] = {}
     for idx, cell in enumerate(row.cells):
         key = id(cell._tc)
         if key not in seen:
-            seen[key] = [idx, idx, _word_cell_to_text(cell)]
+            seen[key] = [idx, idx, cell, _word_cell_to_text(cell)]
         else:
             seen[key][1] = idx
-    result = [(last, text, last - first + 1) for first, last, text in seen.values()]
+    result = [
+        (first, last, cell, text, last - first + 1)
+        for first, last, cell, text in seen.values()
+    ]
     return sorted(result, key=lambda item: item[0])
 
 
@@ -1104,45 +1163,74 @@ def _clean_change_number_candidate(text: str) -> str:
     return value.strip()
 
 
-def _extract_change_notice_number(table, header_start_row: int) -> Tuple[str, List[str]]:
+def _locate_change_notice_number_cell(
+    table,
+    header_start_row: int,
+    title_rows: Optional[Sequence[int]] = None,
+) -> Tuple[Optional[int], Optional[int], Optional[Any], List[str]]:
+    """Locate the dedicated top-right Number cell in the standard template.
+
+    The Number is not inferred from arbitrary codes elsewhere in the header. The
+    standard template has a wide title cell and a separate narrow cell at its far
+    right; that exact cell is used.
+    """
     warnings: List[str] = []
-    candidates: List[Tuple[float, str]] = []
-    limit = max(1, min(header_start_row, len(table.rows)))
-    max_cols = max((len(r.cells) for r in table.rows), default=1)
-    excluded_exact = {
-        "number", "nummer", "no", "nr", "benennung", "description", "beschreibung",
-        "freigabeaenderungsmitteilung", "engineeringchangenotice",
-    }
-    for row_idx in range(limit):
-        for col_idx, raw, span in _unique_row_cells(table.rows[row_idx]):
-            if span > max(2, max_cols // 2):
-                continue
-            value = clean_text(raw)
-            if not value:
-                continue
-            key = _cell_key(value)
-            if not key or key in excluded_exact:
-                continue
-            if _has_any(key, ["freigabeaenderungsmitteilung", "engineeringchangenotice", "benennungdescription"]):
-                continue
-            cleaned = _clean_change_number_candidate(value)
-            cleaned_key = _cell_key(cleaned)
-            if not cleaned or cleaned_key in excluded_exact:
-                continue
-            # Prefer top-right values containing digits or code separators.
-            score = (col_idx / max_cols) * 30 + (10 if row_idx == 0 else 0)
-            if re.search(r"\d", cleaned):
-                score += 35
-            if re.search(r"[-_/]", cleaned):
-                score += 10
-            if len(cleaned) <= 40:
-                score += 5
-            candidates.append((score, cleaned))
-    if not candidates:
-        warnings.append("The top-right change-notice Number could not be read or still contains only a placeholder.")
-        return "", warnings
-    candidates.sort(key=lambda item: item[0], reverse=True)
-    return candidates[0][1], warnings
+    row_candidates: List[int] = []
+    for idx in title_rows or []:
+        if 0 <= idx < len(table.rows) and idx not in row_candidates:
+            row_candidates.append(idx)
+    for idx in range(max(0, min(header_start_row, len(table.rows)))):
+        if idx not in row_candidates:
+            row_candidates.append(idx)
+
+    for row_idx in row_candidates:
+        distinct = _unique_row_cell_objects(table.rows[row_idx])
+        if len(distinct) < 2:
+            continue
+        # Prefer a row containing the title, then take its separate far-right cell.
+        title_positions = [
+            item for item in distinct
+            if _has_any(_cell_key(item[3]), ["freigabeaenderungsmitteilung", "engineeringchangenotice"])
+        ]
+        if title_positions:
+            title_last = max(item[1] for item in title_positions)
+            right_cells = [item for item in distinct if item[0] > title_last]
+            if right_cells:
+                first, last, cell, _text, _span = max(right_cells, key=lambda item: item[1])
+                return row_idx, last, cell, warnings
+
+    # Structural fallback: first pre-header row with a broad left cell and a narrow
+    # dedicated cell on the far right. This still targets the Number panel only.
+    for row_idx in row_candidates:
+        distinct = _unique_row_cell_objects(table.rows[row_idx])
+        if len(distinct) < 2:
+            continue
+        left = min(distinct, key=lambda item: item[0])
+        right = max(distinct, key=lambda item: item[1])
+        if left[4] >= 2 and right[4] <= max(2, len(table.rows[row_idx].cells) // 4):
+            return row_idx, right[1], right[2], warnings
+
+    warnings.append("The dedicated top-right Number cell could not be located.")
+    return None, None, None, warnings
+
+
+def _extract_change_notice_number(
+    table,
+    header_start_row: int,
+    title_rows: Optional[Sequence[int]] = None,
+) -> Tuple[str, List[str], Optional[int], Optional[int]]:
+    row_idx, col_idx, cell, warnings = _locate_change_notice_number_cell(
+        table, header_start_row, title_rows=title_rows
+    )
+    if cell is None:
+        return "", warnings, row_idx, col_idx
+    raw = _word_cell_to_text(cell)
+    cleaned = _clean_change_number_candidate(raw)
+    placeholder_key = _cell_key(cleaned)
+    if not cleaned or placeholder_key in {"number", "nummer", "no", "nr"}:
+        warnings.append("The top-right Number cell is empty or still contains only its placeholder.")
+        return "", warnings, row_idx, col_idx
+    return cleaned, warnings, row_idx, col_idx
 
 
 def _detect_change_notice_table(table, table_index: int) -> Optional[Dict[str, Any]]:
@@ -1207,7 +1295,9 @@ def _detect_change_notice_table(table, table_index: int) -> Optional[Dict[str, A
             break
         data_start += 1
 
-    change_raw, warnings = _extract_change_notice_number(table, min(detail_header_rows))
+    change_raw, warnings, change_row, change_col = _extract_change_notice_number(
+        table, min(detail_header_rows), title_rows=[r for r, _ in title_hits]
+    )
     score = 100 + (20 if title_hits else 0) + min(max_cols, 20)
     return {
         "score": score,
@@ -1222,6 +1312,8 @@ def _detect_change_notice_table(table, table_index: int) -> Optional[Dict[str, A
             **({"seiten": sheets_col} if sheets_col >= 0 else {}),
         },
         "change_number_raw": change_raw,
+        "change_number_cell_row": change_row,
+        "change_number_cell_col": change_col,
         "warnings": warnings + ([] if sheets_col >= 0 else ["The Blatt / sheets column was not detected; PDF page-count comparison will be unavailable."]),
     }
 
@@ -1276,6 +1368,8 @@ def extract_change_notice_word_records(docx_path: Path | str) -> Tuple[List[Word
         columns_by_index_zero_based=dict(columns),
         change_number_raw=change_raw,
         change_number_norm=change_norm,
+        change_number_cell_row_zero_based=detected.get("change_number_cell_row"),
+        change_number_cell_col_zero_based=detected.get("change_number_cell_col"),
         warnings=list(detected["warnings"]),
     )
     return records, info
@@ -1558,6 +1652,7 @@ def run_validation(
     word_docx_path: Optional[Path | str] = None,
     word_mapping_path: Optional[Path | str] = None,
     progress_callback=None,
+    summary_callback=None,
 ) -> List[ValidationResult]:
     has_pdf_folder = bool(clean_text(pdf_folder))
     has_word = bool(clean_text(word_docx_path))
@@ -1663,6 +1758,12 @@ def run_validation(
         excel_path=excel_path,
         pdf_folder=pdf_folder,
     )
+    if summary_callback:
+        summary_callback(build_compact_run_summary(
+            results, records, word_results,
+            pdf_folder_provided=has_pdf_folder,
+            word_file_provided=has_word,
+        ))
     if progress_callback:
         progress_callback(f"Done. Report saved to: {output_path}")
     return results
@@ -1769,6 +1870,230 @@ def _word_severity(result: WordValidationResult) -> str:
     if result.page_count_result not in {"OK", "NOT_CHECKED", ""}:
         return _max_severity([base, "ERROR"])
     return base
+
+
+def build_compact_run_summary(
+    pdf_results: Sequence[ValidationResult],
+    excel_records: Sequence[ExcelRecord],
+    word_results: Optional[Sequence[WordValidationResult]],
+    pdf_folder_provided: bool,
+    word_file_provided: bool,
+) -> Dict[str, Any]:
+    """Build the concise result model shown in the application's right panel.
+
+    Only actionable exceptions are listed. Each item contains the reliable Excel
+    DOK-ID when one is available and a short human-readable description of the
+    incorrect value.
+    """
+    excel_by_row = {record.row_number: record for record in excel_records}
+    issues: List[Dict[str, str]] = []
+    seen: set[Tuple[str, str, str]] = set()
+
+    def add(severity: str, dok_id: str, issue: str, source: str = "") -> None:
+        key = (severity, clean_text(dok_id), clean_text(issue))
+        if not issue or key in seen:
+            return
+        seen.add(key)
+        issues.append({
+            "severity": severity,
+            "dok_id": clean_text(dok_id),
+            "issue": clean_text(issue),
+            "source": clean_text(source),
+        })
+
+    pdf_by_excel: Dict[int, List[ValidationResult]] = {}
+    for result in pdf_results:
+        if result.matched_excel_row:
+            pdf_by_excel.setdefault(result.matched_excel_row, []).append(result)
+        record = excel_by_row.get(result.matched_excel_row or -1)
+        reliable_id = record.values_raw.get("dok_id", "") if record else ""
+        dok_comparison = next((c for c in result.comparisons if c.field == PDF_FIELD_DISPLAY["dok_id"]), None)
+        if dok_comparison and dok_comparison.result not in {"OK", "BOTH_EMPTY"}:
+            reliable_id = ""  # The displayed ID itself is the incorrect value.
+        for comp in result.comparisons:
+            if comp.result in {"OK", "BOTH_EMPTY"}:
+                continue
+            severity = "WARNING" if result.status in {"LIKELY_WRONG_DOK_ID", "DUPLICATE_DOK_ID_RESOLVED"} and comp.field == PDF_FIELD_DISPLAY["dok_id"] else "ERROR"
+            add(
+                severity,
+                reliable_id,
+                f'{comp.field}: PDF "{comp.pdf_raw or "<empty>"}" ≠ {comp.source} "{comp.reference_raw or "<empty>"}"',
+                result.extracted.file_name,
+            )
+        if result.status not in {"OK", "OK_WITH_NORMALIZATION", "MISMATCH", "AUSGABE_MISMATCH", "MISMATCH_AND_AUSGABE_MISMATCH"}:
+            add(_pdf_severity(result.status), reliable_id, _join_unique(result.issues) or PDF_STATUS_LABELS.get(result.status, result.status), result.extracted.file_name)
+        for warning in result.extracted.warnings:
+            add("WARNING", reliable_id, warning, result.extracted.file_name)
+
+    word_by_excel: Dict[int, List[WordValidationResult]] = {}
+    for result in word_results or []:
+        if result.matched_excel_row:
+            word_by_excel.setdefault(result.matched_excel_row, []).append(result)
+        record = excel_by_row.get(result.matched_excel_row or -1)
+        reliable_id = record.values_raw.get("dok_id", "") if record else ""
+        for comp in result.comparisons:
+            if comp.result in {"OK", "BOTH_EMPTY"}:
+                continue
+            add(
+                _word_severity(result),
+                reliable_id,
+                f'{comp.field}: Word "{comp.word_raw or "<empty>"}" ≠ Excel "{comp.excel_raw or "<empty>"}"',
+                f"Word row {result.record.word_row_number}",
+            )
+        if result.page_count_result not in {"OK", "NOT_CHECKED", ""}:
+            if result.page_count_result == "UNAVAILABLE_NO_PDFS":
+                add("WARNING", reliable_id, "Blatt / sheets could not be verified because no PDF folder was selected.", f"Word row {result.record.word_row_number}")
+            else:
+                pdf_value = str(result.pdf_pages) if result.pdf_pages is not None else "unavailable"
+                add(
+                    "ERROR",
+                    reliable_id,
+                    f'Blatt / sheets: Word "{result.word_pages_raw or "<empty>"}" ≠ PDF "{pdf_value}"',
+                    f"Word row {result.record.word_row_number}",
+                )
+        if result.status in {
+            "WORD_DOCUMENT_NOT_IN_EXCEL", "WORD_AMBIGUOUS_MATCH", "WORD_NO_RELIABLE_MATCH",
+            "WORD_TABLE_NOT_RECOGNIZED", "WORD_EXTRACTION_ERROR",
+        }:
+            add(_word_severity(result), reliable_id, _join_unique(result.issues) or WORD_STATUS_LABELS.get(result.status, result.status), f"Word row {result.record.word_row_number}")
+
+    # Show expected source presence for each Excel entry, just like the workbook report.
+    for record in excel_records:
+        dok_id = record.values_raw.get("dok_id", "")
+        document = record.values_raw.get("dokumentnummer", "")
+        if pdf_folder_provided and record.row_number not in pdf_by_excel:
+            add("ERROR", dok_id, f'PDF not found for Dokumentnummer "{document}".', "PDF folder")
+        if word_file_provided and record.row_number not in word_by_excel:
+            add("ERROR", dok_id, f'Word entry not found for Dokumentnummer "{document}".', "Word table")
+
+    issues.sort(key=lambda item: (-_severity_rank(item["severity"]), item["dok_id"], item["issue"]))
+    error_count = sum(1 for item in issues if item["severity"] == "ERROR")
+    warning_count = sum(1 for item in issues if item["severity"] == "WARNING")
+    all_correct = not issues
+    return {
+        "all_correct": all_correct,
+        "checked_entries": len(excel_records),
+        "issue_count": len(issues),
+        "error_count": error_count,
+        "warning_count": warning_count,
+        "issues": issues,
+        "word_correction_available": bool(word_file_provided),
+    }
+
+
+def create_corrected_word_copy(
+    word_docx_path: Path | str,
+    excel_path: Path | str,
+    output_path: Path | str,
+    sheet_name: Optional[str] = None,
+    pdf_folder: Optional[Path | str] = None,
+    progress_callback=None,
+) -> WordCorrectionResult:
+    """Create a corrected copy of the standard Word change-notice document.
+
+    The original file is never overwritten. Matched Word rows receive exact Excel
+    values for Artikel-Nr., Dokument-Nr., Rev neu and Vers neu. The dedicated
+    top-right Number receives the common Excel Freigabe-/Änd.-Nr. When PDFs are
+    available, Blatt / sheets receives the actual PDF page count.
+    """
+    word_docx_path = Path(word_docx_path)
+    output_path = Path(output_path)
+    if word_docx_path.resolve() == output_path.resolve():
+        raise ValueError("Choose a different output path; the original Word file is not overwritten.")
+    if progress_callback:
+        progress_callback("Loading Excel and matching Word rows...")
+    excel_records, _sheet, _header, _columns = load_excel_records(excel_path, sheet_name)
+    excel_by_row = {record.row_number: record for record in excel_records}
+    dok_idx = build_dok_id_index(excel_records)
+    word_records, info = extract_change_notice_word_records(word_docx_path)
+    word_results = validate_word_records(word_records, excel_records, dok_idx)
+
+    pdf_results: List[ValidationResult] = []
+    if clean_text(pdf_folder):
+        pdf_files = list_pdf_files(pdf_folder)
+        for pdf in pdf_files:
+            extracted = extract_pdf_table(pdf, page_number=2)
+            # Ausgabe is irrelevant for correction; compare the extracted month to itself.
+            expected_raw = extracted.values_raw.get("ausgabe", "")
+            expected_norm = extracted.values_norm.get("ausgabe", "")
+            pdf_results.append(validate_one_pdf(extracted, excel_records, dok_idx, expected_raw, expected_norm))
+        apply_word_page_count_checks(word_results, pdf_results, pdfs_available=True)
+    else:
+        apply_word_page_count_checks(word_results, pdf_results, pdfs_available=False)
+
+    doc = Document(word_docx_path)
+    if info.table_index_zero_based >= len(doc.tables):
+        raise ValueError("The recognized Word table could not be reopened for correction.")
+    table = doc.tables[info.table_index_zero_based]
+    result = WordCorrectionResult(output_path=output_path)
+    freigabe_values: set[str] = set()
+
+    for word_result in word_results:
+        if not word_result.matched_excel_row:
+            result.skipped_rows += 1
+            result.warnings.append(f"Word row {word_result.record.word_row_number} was skipped because it could not be matched uniquely to Excel.")
+            continue
+        excel_record = excel_by_row[word_result.matched_excel_row]
+        row_idx = word_result.record.word_row_number - 1
+        if not (0 <= row_idx < len(table.rows)):
+            result.skipped_rows += 1
+            result.warnings.append(f"Word row {word_result.record.word_row_number} could not be located in the output document.")
+            continue
+        cells = table.rows[row_idx].cells
+        row_changed = False
+        for field_name in ("artikelnummer", "dokumentnummer", "revision", "version"):
+            col_idx = info.columns_by_index_zero_based.get(field_name)
+            if col_idx is None or not (0 <= col_idx < len(cells)):
+                continue
+            desired = excel_record.values_raw.get(field_name, "")
+            current = _word_cell_to_text(cells[col_idx])
+            if current != desired:
+                _set_word_cell_text_preserve_structure(cells[col_idx], desired)
+                result.changed_cells += 1
+                row_changed = True
+        page_col = info.columns_by_index_zero_based.get("seiten")
+        if page_col is not None and 0 <= page_col < len(cells) and word_result.pdf_pages is not None:
+            desired_pages = str(word_result.pdf_pages)
+            current_pages = _word_cell_to_text(cells[page_col])
+            if current_pages != desired_pages:
+                _set_word_cell_text_preserve_structure(cells[page_col], desired_pages)
+                result.changed_cells += 1
+                row_changed = True
+        if row_changed:
+            result.corrected_rows += 1
+        freigabe = clean_text(excel_record.values_raw.get("freigabe", ""))
+        if freigabe:
+            freigabe_values.add(freigabe)
+
+    if len(freigabe_values) == 1:
+        desired_number = next(iter(freigabe_values))
+        number_row = info.change_number_cell_row_zero_based
+        number_col = info.change_number_cell_col_zero_based
+        if number_row is not None and number_col is not None and 0 <= number_row < len(table.rows):
+            number_cells = table.rows[number_row].cells
+            if 0 <= number_col < len(number_cells):
+                number_cell = number_cells[number_col]
+                if _clean_change_number_candidate(_word_cell_to_text(number_cell)) != desired_number:
+                    _set_word_cell_text_preserve_structure(number_cell, desired_number)
+                    result.changed_cells += 1
+            else:
+                result.warnings.append("The top-right Number cell could not be addressed in the output document.")
+        else:
+            result.warnings.append("The top-right Number cell could not be located for automatic correction.")
+    elif len(freigabe_values) > 1:
+        result.warnings.append(
+            "The matched Excel rows contain different Freigabe-/Änd.-Nr. values ("
+            + ", ".join(sorted(freigabe_values))
+            + "). The single top-right Word Number was therefore left unchanged."
+        )
+    else:
+        result.warnings.append("No reliable Excel Freigabe-/Änd.-Nr. was available for the top-right Number field.")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    doc.save(output_path)
+    if progress_callback:
+        progress_callback(f"Corrected Word copy saved: {output_path}")
+    return result
 
 
 def _status_fill_for_severity(severity: str) -> PatternFill:

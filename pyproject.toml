@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "profile-docs-checker"
-version = "1.4.0"
-description = "Validate fixed-template PDFs and Word change notices against Excel with strict values and PDF page-count checks."
+version = "1.5.0"
+description = "Validate PDF and Word document metadata against Excel, show concise in-app results, and create corrected Word copies."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
