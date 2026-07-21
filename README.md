@@ -1,10 +1,10 @@
-# Profile Docs Checker 1.5.0
+# Profile Docs Checker 1.5.1
 
 Profile Docs Checker validates document metadata across a fixed Excel master list, selectable PDFs, and the standard bilingual Word **Freigabe-/Änderungsmitteilung / Engineering Change Notice** template.
 
 ## What version 1.5 changes
 
-- The Word **Freigabe-/Änd.-Nr.** is now read deterministically from the dedicated top-right `Number` panel of the change-notice table.
+- The Word **Freigabe-/Änd.-Nr.** is read from the confirmed address `section[0].header.table[0].row[0].cell[1].paragraph[0].word[0]`. This exact header location takes precedence over any Number-like value in the body table.
 - Text nested inside Word content controls or split across formatted runs is read correctly.
 - The right side of the GUI is now the concise live report:
   - green confirmation when every selected check passes;
@@ -95,7 +95,7 @@ Check the installed version:
 py -c "import importlib.metadata as m; print(m.version('profile-docs-checker'))"
 ```
 
-It should print `1.5.0`.
+It should print `1.5.1`.
 
 ## Run the GUI
 

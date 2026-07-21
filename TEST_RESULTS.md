@@ -1,4 +1,4 @@
-# Test results — Profile Docs Checker 1.5.0
+# Test results — Profile Docs Checker 1.5.1
 
 Tested locally with generated, non-confidential PDF, Excel and Word fixtures.
 
@@ -64,7 +64,15 @@ Passed under a virtual X display:
 
 Passed:
 
-- wheel/source installation as `profile-docs-checker==1.5.0`;
+- wheel/source installation as `profile-docs-checker==1.5.1`;
 - package imports successfully;
 - console entry points are generated;
 - installed synthetic validation creates the two-sheet report.
+
+
+## Exact header-address regression test
+
+- Created a Word document with the valid ECN Number at `section[0].header.table[0].row[0].cell[1].paragraph[0].word[0]`.
+- Added a conflicting Number-like value in the body table.
+- Confirmed the extractor uses the header value and ignores the body distractor.
+- Confirmed corrected-copy generation writes the Excel Freigabe-/Änd.-Nr. back to the same header address.

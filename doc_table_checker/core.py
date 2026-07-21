@@ -191,6 +191,9 @@ class WordExtractionInfo:
     columns_by_index_zero_based: Dict[str, int] = field(default_factory=dict)
     change_number_raw: str = ""
     change_number_norm: str = ""
+    change_number_source: str = "body_table"
+    change_number_section_zero_based: Optional[int] = None
+    change_number_header_table_zero_based: Optional[int] = None
     change_number_cell_row_zero_based: Optional[int] = None
     change_number_cell_col_zero_based: Optional[int] = None
     warnings: List[str] = field(default_factory=list)
@@ -1163,6 +1166,99 @@ def _clean_change_number_candidate(text: str) -> str:
     return value.strip()
 
 
+def _paragraph_visible_text(paragraph) -> str:
+    """Return all visible text from a Word paragraph, including content controls."""
+    try:
+        return clean_text("".join((node.text or "") for node in paragraph._p.xpath(".//w:t")))
+    except Exception:
+        return clean_text(getattr(paragraph, "text", ""))
+
+
+def _extract_change_number_from_exact_header_address(doc) -> Tuple[
+    str,
+    List[str],
+    Optional[int],
+    Optional[int],
+    Optional[int],
+    Optional[int],
+]:
+    """Read the ECN number from its confirmed Word address.
+
+    The user's template inspector identified the exact location as::
+
+        section[0].header.table[0].row[0].cell[1].paragraph[0].word[0]
+
+    ``python-docx`` has no direct ``word`` object, so the first whitespace-delimited
+    token in paragraph 0 is used. Reading this exact header cell takes precedence
+    over all heuristic/body-table detection.
+    """
+    warnings: List[str] = []
+    section_idx = header_table_idx = row_idx = col_idx = 0
+    col_idx = 1
+    try:
+        section = doc.sections[section_idx]
+        header = section.header
+        table = header.tables[header_table_idx]
+        cell = table.rows[row_idx].cells[col_idx]
+        if not cell.paragraphs:
+            warnings.append(
+                "The confirmed Word header Number cell exists but has no paragraph."
+            )
+            return "", warnings, section_idx, header_table_idx, row_idx, col_idx
+
+        paragraph_text = _paragraph_visible_text(cell.paragraphs[0])
+        words = paragraph_text.split()
+        candidate = words[0] if words else ""
+        cleaned = _clean_change_number_candidate(candidate)
+        placeholder_key = _cell_key(cleaned)
+        if not cleaned or placeholder_key in {"number", "nummer", "no", "nr"}:
+            # A formatted/content-control implementation can occasionally put the
+            # text outside the paragraph wrapper. Try the whole confirmed cell as
+            # a narrow fallback, still without scanning any unrelated location.
+            cell_text = _word_cell_to_text(cell)
+            cell_words = cell_text.split()
+            cleaned = _clean_change_number_candidate(cell_words[0] if cell_words else "")
+            placeholder_key = _cell_key(cleaned)
+
+        if not cleaned or placeholder_key in {"number", "nummer", "no", "nr"}:
+            warnings.append(
+                "The confirmed Word header Number address is empty or contains only its placeholder."
+            )
+            return "", warnings, section_idx, header_table_idx, row_idx, col_idx
+
+        return cleaned, warnings, section_idx, header_table_idx, row_idx, col_idx
+    except (IndexError, AttributeError) as exc:
+        warnings.append(
+            "The confirmed Word header Number address could not be opened: " + str(exc)
+        )
+        return "", warnings, section_idx, header_table_idx, row_idx, col_idx
+
+
+def _set_first_word_in_confirmed_header_cell(cell, value: object) -> None:
+    """Replace paragraph[0].word[0] while preserving the rest of the cell text."""
+    desired = clean_text(value)
+    if not cell.paragraphs:
+        _set_word_cell_text_preserve_structure(cell, desired)
+        return
+    paragraph = cell.paragraphs[0]
+    try:
+        nodes = list(paragraph._p.xpath(".//w:t"))
+    except Exception:
+        nodes = []
+    if not nodes:
+        _set_word_cell_text_preserve_structure(cell, desired)
+        return
+
+    original = "".join((node.text or "") for node in nodes)
+    if re.search(r"\S+", original):
+        updated = re.sub(r"\S+", desired, original, count=1)
+    else:
+        updated = desired
+    nodes[0].text = updated
+    for node in nodes[1:]:
+        node.text = ""
+
+
 def _locate_change_notice_number_cell(
     table,
     header_start_row: int,
@@ -1336,7 +1432,36 @@ def extract_change_notice_word_records(docx_path: Path | str) -> Tuple[List[Word
     detections.sort(key=lambda item: item[0]["score"], reverse=True)
     detected, table = detections[0]
     columns = detected["columns"]
-    change_raw = detected["change_number_raw"]
+    (
+        exact_change_raw,
+        exact_warnings,
+        exact_section_idx,
+        exact_header_table_idx,
+        exact_row_idx,
+        exact_col_idx,
+    ) = _extract_change_number_from_exact_header_address(doc)
+
+    # The confirmed section/header address is authoritative. The prior body-table
+    # locator remains only as a backward-compatible fallback for older synthetic
+    # documents and variants that do not contain the expected header structure.
+    if exact_change_raw:
+        change_raw = exact_change_raw
+        change_source = "section[0].header.table[0].row[0].cell[1].paragraph[0].word[0]"
+        change_section_idx = exact_section_idx
+        change_header_table_idx = exact_header_table_idx
+        change_row_idx = exact_row_idx
+        change_col_idx = exact_col_idx
+        change_warnings = exact_warnings
+    else:
+        change_raw = detected["change_number_raw"]
+        change_source = "body_table_fallback"
+        change_section_idx = None
+        change_header_table_idx = None
+        change_row_idx = detected.get("change_number_cell_row")
+        change_col_idx = detected.get("change_number_cell_col")
+        change_warnings = exact_warnings + [
+            "The confirmed header address yielded no usable Number; the legacy body-table locator was used."
+        ]
     change_norm = normalize_field("freigabe", change_raw)
     records: List[WordRecord] = []
     for row_idx in range(detected["data_start"], len(table.rows)):
@@ -1368,9 +1493,12 @@ def extract_change_notice_word_records(docx_path: Path | str) -> Tuple[List[Word
         columns_by_index_zero_based=dict(columns),
         change_number_raw=change_raw,
         change_number_norm=change_norm,
-        change_number_cell_row_zero_based=detected.get("change_number_cell_row"),
-        change_number_cell_col_zero_based=detected.get("change_number_cell_col"),
-        warnings=list(detected["warnings"]),
+        change_number_source=change_source,
+        change_number_section_zero_based=change_section_idx,
+        change_number_header_table_zero_based=change_header_table_idx,
+        change_number_cell_row_zero_based=change_row_idx,
+        change_number_cell_col_zero_based=change_col_idx,
+        warnings=list(detected["warnings"]) + change_warnings,
     )
     return records, info
 
@@ -2069,7 +2197,32 @@ def create_corrected_word_copy(
         desired_number = next(iter(freigabe_values))
         number_row = info.change_number_cell_row_zero_based
         number_col = info.change_number_cell_col_zero_based
-        if number_row is not None and number_col is not None and 0 <= number_row < len(table.rows):
+        if info.change_number_source.startswith("section[0].header.table[0]"):
+            section_idx = info.change_number_section_zero_based
+            header_table_idx = info.change_number_header_table_zero_based
+            if None not in {section_idx, header_table_idx, number_row, number_col}:
+                try:
+                    number_cell = (
+                        doc.sections[section_idx]
+                        .header.tables[header_table_idx]
+                        .rows[number_row]
+                        .cells[number_col]
+                    )
+                    current_paragraph = (
+                        _paragraph_visible_text(number_cell.paragraphs[0])
+                        if number_cell.paragraphs else _word_cell_to_text(number_cell)
+                    )
+                    current_first_word = current_paragraph.split()[0] if current_paragraph.split() else ""
+                    if _clean_change_number_candidate(current_first_word) != desired_number:
+                        _set_first_word_in_confirmed_header_cell(number_cell, desired_number)
+                        result.changed_cells += 1
+                except (IndexError, AttributeError) as exc:
+                    result.warnings.append(
+                        "The confirmed header Number address could not be written: " + str(exc)
+                    )
+            else:
+                result.warnings.append("The confirmed header Number address is incomplete.")
+        elif number_row is not None and number_col is not None and 0 <= number_row < len(table.rows):
             number_cells = table.rows[number_row].cells
             if 0 <= number_col < len(number_cells):
                 number_cell = number_cells[number_col]
