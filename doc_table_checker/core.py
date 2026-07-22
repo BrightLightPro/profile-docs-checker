@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, date
 from pathlib import Path
+from copy import deepcopy
 import re
 import unicodedata
 import json
@@ -244,6 +245,16 @@ class WordCorrectionResult:
     changed_cells: int = 0
     corrected_rows: int = 0
     skipped_rows: int = 0
+    warnings: List[str] = field(default_factory=list)
+
+
+@dataclass
+class WordFillResult:
+    output_path: Path
+    filled_rows: int = 0
+    added_rows: int = 0
+    cleared_rows: int = 0
+    changed_cells: int = 0
     warnings: List[str] = field(default_factory=list)
 
 
@@ -2098,6 +2109,17 @@ def build_compact_run_summary(
     error_count = sum(1 for item in issues if item["severity"] == "ERROR")
     warning_count = sum(1 for item in issues if item["severity"] == "WARNING")
     all_correct = not issues
+    word_correction_needed = False
+    for result in word_results or []:
+        if any(comp.result not in {"OK", "BOTH_EMPTY"} for comp in result.comparisons):
+            word_correction_needed = True
+            break
+        if result.page_count_result in {
+            "WORD_PAGE_COUNT_MISSING", "WORD_PAGE_COUNT_UNSUPPORTED",
+            "PDF_NOT_FOUND", "AMBIGUOUS_PDF_PAGE_COUNT", "MISMATCH",
+        }:
+            word_correction_needed = True
+            break
     return {
         "all_correct": all_correct,
         "checked_entries": len(excel_records),
@@ -2106,6 +2128,7 @@ def build_compact_run_summary(
         "warning_count": warning_count,
         "issues": issues,
         "word_correction_available": bool(word_file_provided),
+        "word_correction_needed": word_correction_needed,
     }
 
 
@@ -2246,6 +2269,190 @@ def create_corrected_word_copy(
     doc.save(output_path)
     if progress_callback:
         progress_callback(f"Corrected Word copy saved: {output_path}")
+    return result
+
+
+
+def _append_cloned_word_row(table, template_row_index: int):
+    """Append a formatting-preserving clone of an existing Word table row."""
+    if not table.rows:
+        return table.add_row()
+    template_row_index = min(max(0, template_row_index), len(table.rows) - 1)
+    new_tr = deepcopy(table.rows[template_row_index]._tr)
+    table._tbl.append(new_tr)
+    return table.rows[-1]
+
+
+def _pdf_page_counts_by_excel_row(
+    pdf_folder: Optional[Path | str],
+    excel_records: Sequence[ExcelRecord],
+    progress_callback=None,
+) -> Tuple[Dict[int, int], List[str]]:
+    """Return unambiguous actual PDF page counts keyed by matched Excel row."""
+    if not clean_text(pdf_folder):
+        return {}, ["No PDF folder was selected; Blatt / sheets was left blank."]
+    warnings: List[str] = []
+    dok_idx = build_dok_id_index(excel_records)
+    matches: Dict[int, List[Tuple[str, int]]] = {}
+    pdf_files = list_pdf_files(pdf_folder)
+    if not pdf_files:
+        return {}, ["No PDF files were found; Blatt / sheets was left blank."]
+    for index, pdf in enumerate(pdf_files, start=1):
+        if progress_callback:
+            progress_callback(f"Reading PDF page count {index}/{len(pdf_files)}: {pdf.name}")
+        extracted = extract_pdf_table(pdf, page_number=2)
+        if extracted.error:
+            warnings.append(f"{pdf.name}: page count could not be matched to Excel ({extracted.error}).")
+            continue
+        expected_raw = extracted.values_raw.get("ausgabe", "")
+        expected_norm = extracted.values_norm.get("ausgabe", "")
+        validation = validate_one_pdf(
+            extracted, excel_records, dok_idx, expected_raw, expected_norm
+        )
+        if validation.matched_excel_row and extracted.total_pages is not None:
+            matches.setdefault(validation.matched_excel_row, []).append(
+                (pdf.name, int(extracted.total_pages))
+            )
+        else:
+            warnings.append(f"{pdf.name}: no unique Excel row was found for its page count.")
+
+    result: Dict[int, int] = {}
+    for row_number, entries in matches.items():
+        distinct = sorted({pages for _name, pages in entries})
+        if len(entries) == 1 and len(distinct) == 1:
+            result[row_number] = distinct[0]
+        elif len(distinct) == 1:
+            warnings.append(
+                f"Excel row {row_number}: multiple PDFs matched; Blatt / sheets was left blank."
+            )
+        else:
+            warnings.append(
+                f"Excel row {row_number}: matched PDFs have different page counts; Blatt / sheets was left blank."
+            )
+    return result, warnings
+
+
+def fill_word_copy_from_excel(
+    word_docx_path: Path | str,
+    excel_path: Path | str,
+    output_path: Path | str,
+    sheet_name: Optional[str] = None,
+    pdf_folder: Optional[Path | str] = None,
+    progress_callback=None,
+) -> WordFillResult:
+    """Fill a copy of the standard Word change-notice template from Excel.
+
+    One Word data row is populated for every Excel record. Existing template rows
+    are reused; formatting-preserving clones are appended when Excel contains more
+    records than the template has blank rows. Only the in-scope fields are changed.
+    The original Word file is never overwritten.
+    """
+    word_docx_path = Path(word_docx_path)
+    output_path = Path(output_path)
+    if word_docx_path.resolve() == output_path.resolve():
+        raise ValueError("Choose a different output path; the original Word file is not overwritten.")
+    if progress_callback:
+        progress_callback("Loading Excel rows for Word filling...")
+    excel_records, _sheet, _header, _columns = load_excel_records(excel_path, sheet_name)
+    if not excel_records:
+        raise ValueError("No data rows were found in Excel.")
+
+    # Detection works for both an empty template and a previously populated file.
+    _existing_records, info = extract_change_notice_word_records(word_docx_path)
+    doc = Document(word_docx_path)
+    if info.table_index_zero_based >= len(doc.tables):
+        raise ValueError("The recognized Word table could not be reopened for filling.")
+    table = doc.tables[info.table_index_zero_based]
+    data_start = info.data_start_row_zero_based
+    # Automatic extraction skips completely blank template rows because they are
+    # irrelevant during validation. Filling must instead start at the first row
+    # immediately below the detected headers.
+    if data_start >= len(table.rows) and info.header_rows_zero_based:
+        data_start = max(info.header_rows_zero_based) + 1
+    if data_start > len(table.rows):
+        raise ValueError("The first data row in the Word template could not be located.")
+
+    pages_by_excel, page_warnings = _pdf_page_counts_by_excel_row(
+        pdf_folder, excel_records, progress_callback=progress_callback
+    )
+    result = WordFillResult(output_path=output_path, warnings=list(page_warnings))
+
+    # Ensure the template has enough formatted data rows.
+    existing_data_rows = max(0, len(table.rows) - data_start)
+    template_row_idx = data_start if data_start < len(table.rows) else len(table.rows) - 1
+    while len(table.rows) - data_start < len(excel_records):
+        _append_cloned_word_row(table, template_row_idx)
+        result.added_rows += 1
+
+    fields = ("artikelnummer", "dokumentnummer", "revision", "version")
+    for offset, excel_record in enumerate(excel_records):
+        if progress_callback:
+            progress_callback(f"Filling Word row {offset + 1}/{len(excel_records)}...")
+        row = table.rows[data_start + offset]
+        cells = row.cells
+        for field_name in fields:
+            col_idx = info.columns_by_index_zero_based.get(field_name)
+            if col_idx is None or not (0 <= col_idx < len(cells)):
+                continue
+            desired = excel_record.values_raw.get(field_name, "")
+            current = _word_cell_to_text(cells[col_idx])
+            if current != desired:
+                _set_word_cell_text_preserve_structure(cells[col_idx], desired)
+                result.changed_cells += 1
+        page_col = info.columns_by_index_zero_based.get("seiten")
+        if page_col is not None and 0 <= page_col < len(cells):
+            desired_pages = str(pages_by_excel.get(excel_record.row_number, ""))
+            current_pages = _word_cell_to_text(cells[page_col])
+            if current_pages != desired_pages:
+                _set_word_cell_text_preserve_structure(cells[page_col], desired_pages)
+                result.changed_cells += 1
+        result.filled_rows += 1
+
+    # Clear stale in-scope values from unused rows, without touching unrelated columns.
+    for row_idx in range(data_start + len(excel_records), len(table.rows)):
+        cells = table.rows[row_idx].cells
+        row_changed = False
+        for field_name in (*fields, "seiten"):
+            col_idx = info.columns_by_index_zero_based.get(field_name)
+            if col_idx is None or not (0 <= col_idx < len(cells)):
+                continue
+            if _word_cell_to_text(cells[col_idx]):
+                _set_word_cell_text_preserve_structure(cells[col_idx], "")
+                result.changed_cells += 1
+                row_changed = True
+        if row_changed:
+            result.cleared_rows += 1
+
+    # The confirmed header Number is a single global value for the document.
+    freigabe_values = {
+        clean_text(record.values_raw.get("freigabe", ""))
+        for record in excel_records
+        if clean_text(record.values_raw.get("freigabe", ""))
+    }
+    if len(freigabe_values) == 1:
+        desired_number = next(iter(freigabe_values))
+        try:
+            number_cell = doc.sections[0].header.tables[0].rows[0].cells[1]
+            current_text = _paragraph_visible_text(number_cell.paragraphs[0]) if number_cell.paragraphs else _word_cell_to_text(number_cell)
+            current_first = current_text.split()[0] if current_text.split() else ""
+            if _clean_change_number_candidate(current_first) != desired_number:
+                _set_first_word_in_confirmed_header_cell(number_cell, desired_number)
+                result.changed_cells += 1
+        except (IndexError, AttributeError) as exc:
+            result.warnings.append("The confirmed header Number address could not be written: " + str(exc))
+    elif len(freigabe_values) > 1:
+        result.warnings.append(
+            "Excel contains different Freigabe-/Änd.-Nr. values ("
+            + ", ".join(sorted(freigabe_values))
+            + "); the single Word Number was left unchanged."
+        )
+    else:
+        result.warnings.append("Excel contains no Freigabe-/Änd.-Nr.; the Word Number was left unchanged.")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    doc.save(output_path)
+    if progress_callback:
+        progress_callback(f"Filled Word copy saved: {output_path}")
     return result
 
 
